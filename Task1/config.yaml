@@ -6,7 +6,7 @@
 # ── 主表配置 ────────────────────────────────────────────────────
 master:
   filename: "ProdcoilDataSReport.xlsx"
-  search_root: 'E:\SGAI_Project\2026\Tin coating\Task1\data\ETL1 Data\ETL1 25.6-26.6'
+  search_root: 'data\ETL1 Data\ETL1 25.6-26.6'
   search_pattern: "*/ProdcoilDataSReport.xlsx"  # * 匹配一级子目录，** 匹配任意深度
   # 需要保留的列，用 Excel 列字母表示（不区分大小写）。
   # 运行 preview_columns.py 查看完整列字母→列名对照表。
@@ -71,7 +71,7 @@ master:
 # ── 副表配置（列表，支持多副表，按顺序依次合并）──────────────────
 sub_tables:
 
-  - path: "轧钢分析中心数据.xlsx"    # 副表文件路径
+  - path: 'data\Analysis Center Data\25.6-26.6分析中心检测值.csv'    # 副表文件路径
 
     # 关键字段配置
     join_key:
@@ -110,5 +110,5 @@ sub_tables:
 
 # ── 输出配置 ────────────────────────────────────────────────────
 output:
-  path: "merged_result.xlsx"    # 输出文件路径
+  path: 'result/merged_result.xlsx'    # 输出文件路径
   sheet_name: "Result"          # 输出 Sheet 名称

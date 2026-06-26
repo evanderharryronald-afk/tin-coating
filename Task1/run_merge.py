@@ -172,7 +172,61 @@ def load_master(path: Path, keep_col_letters: list[str]) -> pd.DataFrame:
 
     log(f"   ✅ 主表读取完成：{len(df)} 行 × {len(df.columns)} 列")
     return df
+def parse_master_schema(path: Path, keep_col_letters: list[str]):
+    """
+    只做一次：展开合并单元格、生成列名、确定 keep_indices。
+    返回 (keep_indices, selected_names, col_letter_map)。
+    在多张同结构主表的循环外调用一次即可。
+    """
+    log(f"📐 解析主表结构（仅需一次）: {path.parent.name}/{path.name}")
+    log("   展开合并单元格中...")
+    wb_full = load_workbook(str(path), read_only=False, data_only=True)
+    ws_full = wb_full.active
+    merge_map = build_merge_map(ws_full)
+    max_col = detect_max_col(ws_full, merge_map)
+    log(f"   检测到 {max_col} 列")
+    all_col_names = generate_column_names(ws_full, merge_map, max_col)
+    wb_full.close()
 
+    keep_indices = []
+    col_letter_map = {}
+    for letter in keep_col_letters:
+        letter = letter.strip().upper()
+        idx = column_index_from_string(letter) - 1
+        if idx >= max_col:
+            die(f"列 {letter} 超出主表范围（共 {max_col} 列）")
+        semantic_name = all_col_names[idx]
+        keep_indices.append(idx)
+        col_letter_map[semantic_name] = letter
+
+    selected_names = [all_col_names[i] for i in keep_indices]
+    log(f"   ✅ 结构解析完成，保留 {len(keep_indices)} 列")
+    return keep_indices, selected_names, col_letter_map
+
+
+def load_master_data(path: Path, keep_indices: list, selected_names: list, col_letter_map: dict) -> pd.DataFrame:
+    """
+    只读数据行，表头结构复用 parse_master_schema 的结果。
+    """
+    log(f"📂 读取主表数据: {path.parent.name}/{path.name}")
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    ws = wb.active
+
+    rows = []
+    for row in ws.iter_rows(min_row=DATA_START_ROW, values_only=True):
+        if all(v is None for v in row):
+            break
+        rows.append([row[i] if i < len(row) else None for i in keep_indices])
+
+    wb.close()
+
+    if not rows:
+        die(f"主表 {path.parent.name}/{path.name} 没有读取到任何数据行。")
+
+    df = pd.DataFrame(rows, columns=selected_names)
+    df.attrs['col_letter_map'] = col_letter_map
+    log(f"   ✅ 读取完成：{len(df)} 行 × {len(df.columns)} 列")
+    return df
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  合并策略
@@ -470,14 +524,27 @@ def main():
     sub_tables = cfg.get('sub_tables', [])
     if not sub_tables:
         warn("config.yaml 中未配置任何副表（sub_tables 为空），将直接输出主表筛选结果。")
-    all_results = []
 
+    # all_results = []
+    #
+    # for master_path in master_paths:
+    #     result_df = load_master(master_path, keep_col_letters)
+    #     all_results.append(result_df)
+
+
+    # 用第一张表解析结构，只做一次
+    keep_indices, selected_names, col_letter_map = parse_master_schema(
+        master_paths[0], keep_col_letters
+    )
+
+    all_results = []
     for master_path in master_paths:
-        result_df = load_master(master_path, keep_col_letters)
+        result_df = load_master_data(master_path, keep_indices, selected_names, col_letter_map)
         all_results.append(result_df)
 
+
     log(f"纵向拼接 {len(all_results)} 张表...")
-    col_letter_map = all_results[0].attrs.get('col_letter_map', {})
+    # col_letter_map = all_results[0].attrs.get('col_letter_map', {}) # 删掉
     final_df = pd.concat(all_results, ignore_index=True)
     final_df.attrs['col_letter_map'] = col_letter_map
 

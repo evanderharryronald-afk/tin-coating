@@ -7,7 +7,19 @@
 master:
   filename: "ProdcoilDataSReport.xlsx"
   search_root: 'data\ETL1 Data\ETL1 25.6-26.6'
-  search_pattern: '*/ProdcoilDataSReport.xlsx'   # * 通配符匹配 xls 和 xlsx  # * 匹配一级子目录，** 匹配任意深度
+  search_pattern: '*/ProdcoilDataSReport.xlsx'   # * 匹配一级子目录，** 匹配任意深度
+#  search_pattern: '*/ProdcoilDataSReport_1.xlsx'   # 极少数主表格式原来是csv且布局不一样，这个命名是为了和多数正常主表区分，xlsx是手动用excel把csv转换成的，
+
+  # 主表表头行范围和数据起始行（行号从 1 开始计数）
+  header_row_start: 11
+  header_row_end: 14
+  data_start_row: 15
+
+#  # 极少数csv格式的主表表头行范围和数据起始行（行号从 1 开始计数）
+#  header_row_start: 4
+#  header_row_end: 7
+#  data_start_row: 8
+
   # 需要保留的列，用 Excel 列字母表示（不区分大小写）。
   # 运行 preview_columns.py 查看完整列字母→列名对照表。
   keep_columns:
@@ -111,4 +123,5 @@ sub_tables:
 # ── 输出配置 ────────────────────────────────────────────────────
 output:
   path: 'result/merged_result.xlsx'    # 输出文件路径
+#  path: 'result/merged_result_special.xlsx'    # 特殊格式主表输出文件路径
   sheet_name: "Result"          # 输出 Sheet 名称

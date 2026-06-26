@@ -23,14 +23,6 @@ import xlwings as xw
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  常量（主表结构固定，不需要改）
-# ══════════════════════════════════════════════════════════════════════════════
-HEADER_ROW_START = 11
-HEADER_ROW_END   = 14
-DATA_START_ROW   = 15
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  工具函数
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -428,6 +420,7 @@ def merge_one_sub(master_df: pd.DataFrame, sub_cfg: dict, base_dir: Path) -> pd.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    global HEADER_ROW_START, HEADER_ROW_END, DATA_START_ROW
     t_start = time.time()
     parser = argparse.ArgumentParser(description="主副表合并工具")
     parser.add_argument('--config', default=None, help="配置文件路径（默认：同目录下的 config.yaml）")
@@ -457,6 +450,9 @@ def main():
     log(f"共找到 {len(master_paths)} 个主表文件：")
     for p in master_paths:
         log(f"  - {p.parent.name}/{p.name}")
+    HEADER_ROW_START = master_cfg.get('header_row_start', 11)
+    HEADER_ROW_END = master_cfg.get('header_row_end', 14)
+    DATA_START_ROW = master_cfg.get('data_start_row', 15)
 
     # # 检查是否有 .xls 文件
     # xls_files = [p for p in master_paths if p.suffix.lower() == '.xls']

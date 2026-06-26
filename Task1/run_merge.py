@@ -7,18 +7,19 @@ run_merge.py
     python run_merge.py                    # 使用同目录下的 config.yaml
     python run_merge.py --config my.yaml   # 指定配置文件
 """
-
+import pandas as pd
 import sys
 import argparse
 import warnings
 from pathlib import Path
 from collections import Counter
-
+import time
 import pandas as pd
 import numpy as np
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, column_index_from_string
 import yaml
+import xlwings as xw
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -77,16 +78,6 @@ def clean_str(s):
     return str(s).replace('\n', '').replace('\r', '').strip()
 
 
-# def detect_max_col(ws, merge_map):
-#     """通过表头行确定最大列数。"""
-#     max_col = 0
-#     for r in range(HEADER_ROW_START, HEADER_ROW_END + 1):
-#         for c in range(1, 5000):
-#             v = get_val(ws, merge_map, r, c)
-#             if v is not None and clean_str(v):
-#                 max_col = max(max_col, c)
-#     return max_col
-
 def detect_max_col(ws, merge_map):
     """从合并单元格map和表头行直接取最大列号，避免逐列扫描。"""
     # 从 merge_map 取最大列号
@@ -142,16 +133,9 @@ def load_master(path: Path, keep_col_letters: list[str]) -> pd.DataFrame:
     返回 DataFrame，列名为生成的语义列名，同时保留原列字母作为参考信息
     （存在 df.attrs['col_letter_map'] 中）。
     """
-    log(f"📂 读取主表: {path.name}")
+    log(f"📂 读取主表: {path.parent.name}/{path.name}")
     log("   展开合并单元格中...")
 
-    # wb = load_workbook(str(path), read_only=False, data_only=True)
-    # ws = wb.active
-    # merge_map = build_merge_map(ws)
-    # max_col = detect_max_col(ws, merge_map)
-    # log(f"   检测到 {max_col} 列")
-    #
-    # all_col_names = generate_column_names(ws, merge_map, max_col)
 
     # 第一次加载：read_only=False，只用来读合并单元格和表头，读完立即关闭
     wb_full = load_workbook(str(path), read_only=False, data_only=True)
@@ -444,6 +428,7 @@ def merge_one_sub(master_df: pd.DataFrame, sub_cfg: dict, base_dir: Path) -> pd.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    t_start = time.time()
     parser = argparse.ArgumentParser(description="主副表合并工具")
     parser.add_argument('--config', default=None, help="配置文件路径（默认：同目录下的 config.yaml）")
     args = parser.parse_args()
@@ -469,9 +454,18 @@ def main():
     master_paths = sorted(search_root.glob(pattern))
     if not master_paths:
         die(f"在 {search_root} 下按 '{pattern}' 未找到任何主表文件。")
-    log(f"共找到 {len(master_paths)} 个主表文件。")
+    log(f"共找到 {len(master_paths)} 个主表文件：")
+    for p in master_paths:
+        log(f"  - {p.parent.name}/{p.name}")
 
-
+    # # 检查是否有 .xls 文件
+    # xls_files = [p for p in master_paths if p.suffix.lower() == '.xls']
+    # if xls_files:
+    #     log(f"\n❌ 发现 {len(xls_files)} 个不支持的 .xls 文件，请手动转换为 .xlsx 后重新运行：")
+    #     for p in xls_files:
+    #         log(f"   - {p.parent.name}/{p.name}")
+    #     log(f"\n   转换方法：用 Excel 打开该文件 → 另存为 → 选择 xlsx 格式")
+    #     sys.exit(1)
 
     keep_col_letters = cfg['master'].get('keep_columns', [])
     if not keep_col_letters:
@@ -481,20 +475,19 @@ def main():
     if not sub_tables:
         warn("config.yaml 中未配置任何副表（sub_tables 为空），将直接输出主表筛选结果。")
     all_results = []
+
     for master_path in master_paths:
-        log(f"\n{'=' * 60}")
-        log(f"处理: {master_path}")
         result_df = load_master(master_path, keep_col_letters)
-        for i, sub_cfg in enumerate(sub_tables, 1):
-            log(f"\n── 合并第 {i} 个副表 ──")
-            result_df = merge_one_sub(result_df, sub_cfg, base_dir)
         all_results.append(result_df)
 
-    log(f"\n{'=' * 60}")
     log(f"纵向拼接 {len(all_results)} 张表...")
-    import pandas as pd
+    col_letter_map = all_results[0].attrs.get('col_letter_map', {})
     final_df = pd.concat(all_results, ignore_index=True)
-    log(f"拼接完成：{len(final_df)} 行 × {len(final_df.columns)} 列")
+    final_df.attrs['col_letter_map'] = col_letter_map
+
+    for i, sub_cfg in enumerate(sub_tables, 1):
+        log(f"\n── 合并第 {i} 个副表 ──")
+        final_df = merge_one_sub(final_df, sub_cfg, base_dir)
 
     # ── 输出 ──
     out_cfg   = cfg.get('output', {})
@@ -507,7 +500,8 @@ def main():
 
     log(f"\n✅ 全部完成！输出文件: {out_path}")
     log(f"   结果表: {len(final_df)} 行 × {len(final_df.columns)} 列")
-
+    elapsed = time.time() - t_start
+    log(f"   总耗时: {elapsed:.1f} 秒")
 
 if __name__ == '__main__':
     main()

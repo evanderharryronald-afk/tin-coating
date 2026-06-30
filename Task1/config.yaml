@@ -67,17 +67,17 @@ master:
     - "PW"   # GL_35_Avg
     - "QA"   # GL_36_Avg
     - "RX"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg   这一列也有明显数据偏移
-#    - "SA"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Max
-#    - "SB"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min
+    - "SA"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Max
+    - "SB"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min
     - "SD"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Avg
-#    - "SE"  # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Max
-#    - "SF"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min
+    - "SE"  # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Max
+    - "SF"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min
     - "SI"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg
-#    - "SK"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max
-#    - "SL"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min
+    - "SK"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max
+    - "SL"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min
     - "SN"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg
-#    - "SO"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max
-#    - "SP"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min
+    - "SO"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max
+    - "SP"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min
     # 在此继续添加...
 
 # ── 副表配置（列表，支持多副表，按顺序依次合并）──────────────────
@@ -117,6 +117,18 @@ sub_tables:
       - col: "下表面镀层重量D(XA1_0)"
         strategy: mean
       - col: "下表面镀层重量W(XA1_0)"
+        strategy: mean
+      - col: "上表面镀层标准重量(XA1_0)"
+        strategy: mean
+      - col: "上表面镀层重量_最大(XA1_0)"
+        strategy: mean
+      - col: "上表面镀层重量_最小(XA1_0)"
+        strategy: mean
+      - col: "下表面镀层标准重量(XA1_0)"
+        strategy: mean
+      - col: "下表面镀层重量_最大(XA1_0)"
+        strategy: mean
+      - col: "下表面镀层重量_最小(XA1_0)"
         strategy: mean
       # 在此继续添加...
 

@@ -8,27 +8,20 @@ master:
   filename: "ProdcoilDataSReport.xlsx"
   search_root: 'data\ETL1 Data\ETL1 25.6-26.6'
   search_pattern: '*/ProdcoilDataSReport.xlsx'   # * 匹配一级子目录，** 匹配任意深度
-#  search_pattern: '*/ProdcoilDataSReport_1.xlsx'   # 极少数主表格式原来是csv且布局不一样，这个命名是为了和多数正常主表区分，xlsx是手动用excel把csv转换成的，
 
   # 主表表头行范围和数据起始行（行号从 1 开始计数）
   header_row_start: 11
   header_row_end: 14
   data_start_row: 15
 
-#  # 极少数csv格式的主表表头行范围和数据起始行（行号从 1 开始计数）
-#  header_row_start: 4
-#  header_row_end: 7
-#  data_start_row: 8
-
   # 需要保留的列，用 Excel 列字母表示（不区分大小写）。
-  # 运行 preview_columns.py 查看完整列字母→列名对照表。
   keep_columns:
     - "E"    # Coil ID
     - "F"    # Steel Grade
     - "H"    # Produce Time
     - "P"    # Dimension_[mm]_Thickness
     - "Q"    # Dimension_[mm]_Width
-    - "S"    # Dimension_[mm]_Length    这一列存在数据偏移
+    - "S"    # Dimension_[mm]_Length
     - "AL"   # Process_Avg
     - "KN"   # GL_1_Avg
     - "KS"   # GL_2_Avg
@@ -66,19 +59,18 @@ master:
     - "PR"   # GL_34_Avg
     - "PW"   # GL_35_Avg
     - "QA"   # GL_36_Avg
-    - "RX"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg   这一列也有明显数据偏移
+    - "RX"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg
     - "SA"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Max
     - "SB"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min
     - "SD"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Avg
-    - "SE"  # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Max
+    - "SE"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Max
     - "SF"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min
-    - "SI"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg
-    - "SK"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max
-    - "SL"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min
-    - "SN"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg
-    - "SO"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max
-    - "SP"  # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min
-    # 在此继续添加...
+    - "SI"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg
+    - "SK"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max
+    - "SL"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min
+    - "SN"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg
+    - "SO"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max
+    - "SP"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min
 
 # ── 副表配置（列表，支持多副表，按顺序依次合并）──────────────────
 sub_tables:
@@ -88,21 +80,25 @@ sub_tables:
     # 关键字段配置
     join_key:
       master_col: "E"           # 主表关键字段的列字母（对应 Coil ID）
-      sub_col:    "出口材料号(XA1)"      # 副表关键字段的列名（第一行表头中的名称）
+      sub_col:    "出口材料号(XA1)"      # 副表关键字段的列名
       unmatched:  "drop"        # 主表行在副表无匹配时的处理：drop=删除该行；keep=保留填空值（默认）
       all_null:   "drop"        # 匹配到但副表保留列全为空时的处理：drop=删除；keep=保留（默认）
 
+      # 【新增字段】特定列为空剔除行逻辑。
+      # 列表中指定的副表列，只要有任意一列在聚合后为空值(None/NaN)，就自动剔除整行。
+      required_columns:
+        - "上表面镀层重量A(XA1_0)"
+#        - "上表面镀层重量C(XA1_0)"
+#        - "上表面镀层重量D(XA1_0)"
+#        - "上表面镀层重量W(XA1_0)"
+#        - "下表面镀层重量A(XA1_0)"
+#        - "下表面镀层重量C(XA1_0)"
+#        - "下表面镀层重量D(XA1_0)"
+#        - "下表面镀层重量W(XA1_0)"
+
     # 副表需要保留的列及其合并策略
-    # 策略说明：
-    #   first_nonempty  取有值的第一行（过滤空值后取第一条）【默认：文本列】
-    #   first           直接取第一行（不过滤空值）
-    #   mean            均值，忽略空值【默认：数值列】
-    #   sum             求和，忽略空值
-    #   max             最大值，忽略空值
-    #   min             最小值，忽略空值
-    #   join_unique     去重后用逗号拼接（适合文本列）
     keep_columns:
-      - col: "上表面镀层重量A(XA1_0)"       # 副表列名（与表头完全一致）
+      - col: "上表面镀层重量A(XA1_0)"
         strategy: mean
       - col: "上表面镀层重量C(XA1_0)"
         strategy: mean
@@ -130,10 +126,8 @@ sub_tables:
         strategy: mean
       - col: "下表面镀层重量_最小(XA1_0)"
         strategy: mean
-      # 在此继续添加...
 
 # ── 输出配置 ────────────────────────────────────────────────────
 output:
-  path: 'result/merged_result.xlsx'    # 输出文件路径
-#  path: 'result/merged_result_special.xlsx'    # 特殊格式主表输出文件路径
+  path: 'result/merged_result_latest.xlsx'    # 输出文件路径
   sheet_name: "Result"          # 输出 Sheet 名称

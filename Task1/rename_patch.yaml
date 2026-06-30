@@ -1,0 +1,12 @@
+# ═══════════════════════════════════════════════════════════════
+#  merge_tool / rename_patch.yaml
+#  用于手动更正 openpyxl 识别偏差的主表语义列名
+#  格式： "自动识别出的错名": "你期望的正确语义名"
+# ═══════════════════════════════════════════════════════════════
+
+Dimension_[mm]_Width_2: "Dimension_[mm]_Length"
+Tining Section_CURRENT[A]_GL_35_Avg_1: "Tining Section_CURRENT[A]_GL_35_Avg"
+STRIP MARK.MACHINE_Conductivity [uS/cm]_GALV_WEIGHT_TOP_Avg: "Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg"
+Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg_1: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+# 如果未来还有其他列识别错误，直接在下方按相同格式追加即可：
+# Tining Section_CONCENT[NTU]_GL_1_Avg: "Process_Avg"

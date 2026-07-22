@@ -199,46 +199,76 @@ def run_surface_pipeline(df, surface='Top'):
     surface_cn = '上' if surface == 'Top' else '下'
 
     print(f"\n==========================================")
-    print(f"        开始运行【{surface_cn}表面】模型拟合与残差分析     ")
+    print(f"        开始运行【{surface_cn}表面】模型拟合与分析     ")
     print(f"==========================================")
 
     # 1. 相关性分析
     analyze_correlations(df, surface=surface)
 
-    # 2. 构造特征矩阵
+    # 2. 特征工程：增加物理特征（电流/速度比值，表示单位长度给电密度）
+    speed_col = 'Speed[m/min]_Process_Avg'
+    current_col = f'{prefix}_Current_Sum'
+    df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
+
+    # 构造特征矩阵 (包含在线测量值)
     feature_cols = [
-        f'{prefix}_Current_Sum',
+        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',  # 在线测量值作为核心特征
+        current_col,  # 电流和
+        f'{prefix}_Current_Per_Speed',  # 物理衍生特征
         f'{prefix}_Theoretical_Factor',
-        'Speed[m/min]_Process_Avg',
+        speed_col,
         'Dimension_[mm]_Width',
         'Dimension_[mm]_Thickness',
-        'Steel_Grade_Encoded',
-        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+        'Steel_Grade_Encoded'
     ]
 
     X = df[feature_cols]
-    y_delta = df[f'{prefix}_Delta']
-    y_true_lab = df[f'{surface_cn}表面镀层重量A(XA1_0)']
+
+    # 变更拟合目标：直接拟合实验室真实值 (XA1_0)
+    y_target = df[f'{surface_cn}表面镀层重量A(XA1_0)']
     online_actual = df[f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg']
 
-    # 3. 按时间划分 (保持原始索引不重置)
-    X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, lab_train, lab_test = train_test_split(
-        X, y_delta, online_actual, y_true_lab, test_size=0.2, shuffle=False
+    # 3. 按时间划分 (保持原始索引 Index 不重置)
+    X_train, X_test, y_train, y_test, actual_train, actual_test = train_test_split(
+        X, y_target, online_actual, test_size=0.2, shuffle=False
     )
 
-    # 4. 拟合预测
-    model_pipeline = SmoothResidualModel(alpha_smoothing=0.2)
-    model_pipeline.fit(X_train, y_delta_train)
-    final_pred, _ = model_pipeline.predict_smooth(X_test, actual_test)
+    # 4. 拟合预测 (直接对实验室真实值 y_train 进行拟合)
+    # 如果你有自定义的 model_pipeline，可在此处替换
+    model_pipeline = GradientBoostingRegressor(n_estimators=100, random_state=42)
+    model_pipeline.fit(X_train, y_train)
 
-    # 确保保持为 Pandas Series 且带有原始数据行号 Index
-    y_true_series = lab_test
+    # 获取测试集预测结果
+    raw_pred = model_pipeline.predict(X_test)
+
+    # 确保保持为 Pandas Series 且带有测试集原始行号 Index
+    y_true_series = y_test
     online_series = actual_test
-    pred_series = pd.Series(final_pred, index=X_test.index) if not isinstance(final_pred, pd.Series) else final_pred
+    pred_series = pd.Series(raw_pred, index=X_test.index) if not isinstance(raw_pred, pd.Series) else raw_pred
 
-    # 计算残差（继承原始行号 Index）
+    # 计算残差（真实值 - 测量值/预测值，继承原始行号 Index）
     raw_residuals = y_true_series - online_series
     model_residuals = y_true_series - pred_series
+
+    # ----------------------------------------------------
+    # 残差诊断分析：验证正向与负向残差的矫正效果
+    # ----------------------------------------------------
+    print(f"\n-------- 【{surface_cn}表面 模型矫正前后残差诊断】 --------")
+    mask_pos = (raw_residuals > 0)
+    mask_neg = (raw_residuals < 0)
+
+    if mask_pos.sum() > 0:
+        mae_raw_pos = raw_residuals[mask_pos].abs().mean()
+        mae_model_pos = model_residuals[mask_pos].abs().mean()
+        print(
+            f"当原始在线偏低 (残差 > 0, 样本数 {mask_pos.sum()}): 原始 MAE = {mae_raw_pos:.4f}  -->  模型矫正后 MAE = {mae_model_pos:.4f}")
+
+    if mask_neg.sum() > 0:
+        mae_raw_neg = raw_residuals[mask_neg].abs().mean()
+        mae_model_neg = model_residuals[mask_neg].abs().mean()
+        print(
+            f"当原始在线偏高 (残差 < 0, 样本数 {mask_neg.sum()}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
+    print("------------------------------------------------------\n")
 
     # 指标计算
     r2_online = r2_score(y_true_series, online_series)
@@ -246,18 +276,18 @@ def run_surface_pipeline(df, surface='Top'):
     rmse_online = np.sqrt(mean_squared_error(y_true_series, online_series))
     rmse_model = np.sqrt(mean_squared_error(y_true_series, pred_series))
 
-    print(f"\n======== 【{surface_cn}表面 拟合性能评估（测试集）】 ========")
+    print(f"======== 【{surface_cn}表面 拟合性能评估（测试集）】 ========")
     print(f"原始在线仪表与实验室真实值 -> R²: {r2_online:.4f}, RMSE: {rmse_online:.4f}")
     print(f"模型校正拟合后与实验室真实值 -> R²: {r2_model:.4f}, RMSE: {rmse_model:.4f}")
 
     start_idx = X_test.index[0]
     end_idx = X_test.index[-1]
 
-    # 拟合对比图
+    # 5. 拟合对比图
     plt.figure(figsize=(12, 5))
     plt.plot(y_true_series, label='实验室真实测量值 (True Label)', color='black', linewidth=1.5)
     plt.plot(online_series, label='在线仪表原始测量值 (Online)', color='red', linestyle='--', alpha=0.7)
-    plt.plot(pred_series, label='模型平滑校正拟合值 (Model Pred)', color='green', linewidth=1.5, alpha=0.85)
+    plt.plot(pred_series, label='模型直接拟合校正值 (Model Pred)', color='green', linewidth=1.5, alpha=0.85)
     plt.title(f'{surface_cn}表面 镀层重量拟合对照图（原始数据行号: {start_idx} ~ {end_idx}）')
     plt.xlabel('原始数据行号 (Original Row Index)')
     plt.ylabel('镀层重量 (g/m2)')
@@ -270,7 +300,7 @@ def run_surface_pipeline(df, surface='Top'):
     print(f"[图表保存] {surface_cn}表面拟合对照图已保存至: {fit_img_path}")
     plt.show()
 
-    # 残差对比图
+    # 6. 残差对比图
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
 
     ax1.plot(raw_residuals, label='原始在线仪表残差 (True - Online)', color='red', alpha=0.5, linewidth=1)
@@ -283,7 +313,8 @@ def run_surface_pipeline(df, surface='Top'):
     ax1.grid(True, linestyle=':', alpha=0.6)
 
     sns.histplot(raw_residuals, ax=ax2, color='red', label='原始残差分布', kde=True, stat="density", alpha=0.3)
-    sns.histplot(model_residuals, ax=ax2, color='green', label='模型校正后残差分布', kde=True, stat="density", alpha=0.5)
+    sns.histplot(model_residuals, ax=ax2, color='green', label='模型校正后残差分布', kde=True, stat="density",
+                 alpha=0.5)
     ax2.axvline(0, color='black', linestyle='--', linewidth=1)
     ax2.set_title(f'{surface_cn}表面 残差概率密度分布（越集中在0且越窄越好）')
     ax2.set_xlabel('残差/误差 (g/m2)')

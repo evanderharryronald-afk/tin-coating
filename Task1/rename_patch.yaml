@@ -5,6 +5,7 @@
 # ═══════════════════════════════════════════════════════════════
 
 Dimension_[mm]_Width_2: "Dimension_[mm]_Length"
+Tining Section_CONCENT[NTU]_GL_1_Avg: "Tining Section_CURRENT[A]_GL_1_Avg"
 Tining Section_CURRENT[A]_GL_35_Avg_1: "Tining Section_CURRENT[A]_GL_35_Avg"
 STRIP MARK.MACHINE_Conductivity [uS/cm]_GALV_WEIGHT_TOP_Avg: "Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg"
 Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg_1: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"

@@ -87,10 +87,10 @@ sub_tables:
       # 【新增字段】特定列为空剔除行逻辑。
       # 列表中指定的副表列，只要有任意一列在聚合后为空值(None/NaN)，就自动剔除整行。
       required_columns:
-        - "上表面镀层重量A(XA1_0)"
-#        - "上表面镀层重量C(XA1_0)"
-#        - "上表面镀层重量D(XA1_0)"
-#        - "上表面镀层重量W(XA1_0)"
+        - "上表面镀层重量A(XA1_0)"  # Average 均值
+#        - "上表面镀层重量C(XA1_0)" # Center 中心侧
+#        - "上表面镀层重量D(XA1_0)" # Drive 驱动侧
+#        - "上表面镀层重量W(XA1_0)" # Work 操作侧
 #        - "下表面镀层重量A(XA1_0)"
 #        - "下表面镀层重量C(XA1_0)"
 #        - "下表面镀层重量D(XA1_0)"
@@ -129,5 +129,5 @@ sub_tables:
 
 # ── 输出配置 ────────────────────────────────────────────────────
 output:
-  path: 'result/merged_result_latest.xlsx'    # 输出文件路径
+  path: 'result/merged_data/merged_result_latest.xlsx'    # 输出文件路径
   sheet_name: "Result"          # 输出 Sheet 名称

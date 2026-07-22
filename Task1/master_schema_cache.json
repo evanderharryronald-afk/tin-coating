@@ -1,5 +1,5 @@
 {
-  "config_hash": "cfec2b10de4a87cf460334dd83c5741b",
+  "config_hash": "ed68a104daec5a13d1ea93094f70d200",
   "keep_indices": [
     4,
     5,
@@ -65,7 +65,7 @@
     "Dimension_[mm]_Width",
     "Dimension_[mm]_Length",
     "Speed[m/min]_Process_Avg",
-    "Tining Section_CONCENT[NTU]_GL_1_Avg",
+    "Tining Section_CURRENT[A]_GL_1_Avg",
     "Tining Section_CURRENT[A]_GL_2_Avg",
     "Tining Section_CURRENT[A]_GL_3_Avg",
     "Tining Section_CURRENT[A]_GL_4_Avg",
@@ -122,7 +122,7 @@
     "Dimension_[mm]_Width": "Q",
     "Dimension_[mm]_Length": "S",
     "Speed[m/min]_Process_Avg": "AL",
-    "Tining Section_CONCENT[NTU]_GL_1_Avg": "KN",
+    "Tining Section_CURRENT[A]_GL_1_Avg": "KN",
     "Tining Section_CURRENT[A]_GL_2_Avg": "KS",
     "Tining Section_CURRENT[A]_GL_3_Avg": "KW",
     "Tining Section_CURRENT[A]_GL_4_Avg": "LA",

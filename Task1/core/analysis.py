@@ -13,6 +13,7 @@ import seaborn as sns
 from pathlib import Path
 
 
+
 class DataAnalyzer:
     """Data analysis and diagnostics"""
 

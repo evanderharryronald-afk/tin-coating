@@ -6,6 +6,7 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
+from data_cleaner import SteelDataCleaner
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -22,112 +23,6 @@ MIN_GROUP_SAMPLES = 200
 # Setpoint 分组用的两个字段（上下表面镀层重量下限设定值）
 TOP_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min'
 BOT_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min'
-
-
-# ==========================================
-# 1. 数据预处理、离群点诊断与 Excel 导出
-# ==========================================
-def preprocess_and_filter_outliers(df,
-                                   clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-                                   filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"):
-    """
-    数据预处理、诊断离群点并导出Excel记录剔除原因
-    """
-    # 1.0 纠正列名
-    if 'Tining Section_CONCENT[NTU]_GL_1_Avg' in df.columns:
-        df.rename(columns={'Tining Section_CONCENT[NTU]_GL_1_Avg': 'Tining Section_CURRENT[A]_GL_1_Avg'}, inplace=True)
-
-    # 1.1 电流求和处理
-    bot_curr_cols = [f'Tining Section_CURRENT[A]_GL_{i}_Avg' for i in range(1, 37, 2)]
-    top_curr_cols = [f'Tining Section_CURRENT[A]_GL_{i}_Avg' for i in range(2, 37, 2)]
-
-    df['Bot_Current_Sum'] = df[bot_curr_cols].sum(axis=1)
-    df['Top_Current_Sum'] = df[top_curr_cols].sum(axis=1)
-
-    # 1.2 构建理论因子
-    df['Width_m'] = df['Dimension_[mm]_Width'] / 1000.0
-    speed = df['Speed[m/min]_Process_Avg'].replace(0, np.nan)
-
-    df['Top_Theoretical_Factor'] = df['Top_Current_Sum'] / (speed * df['Width_m'])
-    df['Bot_Theoretical_Factor'] = df['Bot_Current_Sum'] / (speed * df['Width_m'])
-
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    # 1.3 计算目标残差 (Residual = 实验室真实值 - 在线测量值)
-    df['Top_Delta'] = df['上表面镀层重量A(XA1_0)'] - df['Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg']
-    df['Bot_Delta'] = df['下表面镀层重量A(XA1_0)'] - df['Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg']
-
-    # 1.4 Steel Grade 钢种频率编码
-    if 'Steel Grade' in df.columns:
-        grade_freq = df['Steel Grade'].value_counts(normalize=True).to_dict()
-        df['Steel_Grade_Encoded'] = df['Steel Grade'].map(grade_freq).fillna(0)
-    else:
-        df['Steel_Grade_Encoded'] = 0
-
-    # ----------------------------------------------------
-    # 离群点诊断与规则过滤逻辑
-    # ----------------------------------------------------
-    initial_count = len(df)
-    df['Filter_Reason'] = ""
-
-    # 规则 1: 基础关键字段存在缺失值
-    required_cols = [
-        'Top_Current_Sum', 'Bot_Current_Sum',
-        'Top_Theoretical_Factor', 'Bot_Theoretical_Factor',
-        'Speed[m/min]_Process_Avg', 'Dimension_[mm]_Width', 'Dimension_[mm]_Thickness',
-        'Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg', 'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg',
-        '上表面镀层重量A(XA1_0)', '下表面镀层重量A(XA1_0)',
-        'Top_Delta', 'Bot_Delta'
-    ]
-    null_mask = df[required_cols].isnull().any(axis=1)
-    df.loc[null_mask, 'Filter_Reason'] += "关键工艺/测量参数存在缺失值; "
-
-    # 计算残差分布统计量 (基于非空子集)
-    valid_df = df[~null_mask]
-    top_delta_std = valid_df['Top_Delta'].std()
-    top_delta_mean = valid_df['Top_Delta'].mean()
-    bot_delta_std = valid_df['Bot_Delta'].std()
-    bot_delta_mean = valid_df['Bot_Delta'].mean()
-
-    # 设置残差异常阈值 (例如超出 3.5 倍标准差)
-    top_threshold = 3.5 * top_delta_std
-    bot_threshold = 3.5 * bot_delta_std
-
-    # 规则 2: 平稳工况下残差极大 (离群数据噪声)
-    steady_speed_mask = df['Speed[m/min]_Process_Avg'] > 80
-    top_outlier_mask = (df['Top_Delta'] - top_delta_mean).abs() > top_threshold
-    bot_outlier_mask = (df['Bot_Delta'] - bot_delta_mean).abs() > bot_threshold
-
-    df.loc[
-        steady_speed_mask & top_outlier_mask, 'Filter_Reason'] += f"上表面平稳工况下残差偏离过大(>{top_threshold:.2f}g/m2); "
-    df.loc[
-        steady_speed_mask & bot_outlier_mask, 'Filter_Reason'] += f"下表面平稳工况下残差偏离过大(>{bot_threshold:.2f}g/m2); "
-
-    # 规则 3: 停机/低速区残差异常 (工艺非正常状态)
-    low_speed_mask = df['Speed[m/min]_Process_Avg'] <= 20
-    df.loc[low_speed_mask, 'Filter_Reason'] += "极低速/停机过渡区数据; "
-
-    filtered_df = df[df['Filter_Reason'] != ""].copy()
-    clean_df = df[df['Filter_Reason'] == ""].copy()
-
-    cols_to_export = ['Coil ID', 'Steel Grade', 'Speed[m/min]_Process_Avg',
-                      'Top_Delta', 'Bot_Delta', 'Filter_Reason']
-    cols_to_export = [c for c in cols_to_export if c in filtered_df.columns]
-
-    filtered_df[cols_to_export].to_excel(filtered_save_path, index=False)
-    clean_df.to_excel(clean_save_path, index=False)
-
-    print("\n==========================================")
-    print("        [数据清洗与异常诊断汇总]          ")
-    print("==========================================")
-    print(f"原始数据总行数: {initial_count}")
-    print(f"被剔除异常点数: {len(filtered_df)} (占比: {len(filtered_df) / initial_count * 100:.2f}%)")
-    print(f"保留干净样本数: {len(clean_df)}")
-    print(f"[导出提示] 被剔除数据明细及原因已保存至: {filtered_save_path}")
-    print(f"[导出提示] 训练用干净数据集已保存至: {clean_save_path}")
-    print("==========================================\n")
-
-    return clean_df
 
 
 # ==========================================
@@ -482,8 +377,16 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
 if __name__ == "__main__":
     raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
 
-    # 步骤 1: 预处理、诊断离群点并自动导出 filtered_outliers.xlsx
-    clean_df = preprocess_and_filter_outliers(
+    # 实例化清洗器（参数可根据业务灵活调整）
+    cleaner = SteelDataCleaner(
+        min_speed=20.0,
+        max_range_abs=0.4,  # 限制 Max - Min 差值不能超过 0.4 g/m2
+        max_range_ratio=0.3,  # 限制波动比例不超过 30%
+        mad_factor=3.0
+    )
+
+    # 完成全部清洗与导出
+    clean_df = cleaner.process(
         raw_df,
         clean_save_path="result/cleaned_data/cleaned_data.xlsx",
         filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"

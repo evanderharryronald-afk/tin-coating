@@ -241,7 +241,8 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
         'Dimension_[mm]_Thickness',
         'Steel_Grade_Encoded'
     ]
-    online_feature_idx = feature_cols.index(online_col)
+    # online_feature_idx = feature_cols.index(online_col)
+    online_feature_idx=None
 
     X = df[feature_cols]
 
@@ -417,10 +418,10 @@ if __name__ == "__main__":
         check_residual_distribution(group_df, group_tag=group_label)
 
         top_model, top_metrics = run_surface_pipeline(
-            group_df, surface='Top', damping=0.5, pos_boost=3,alpha_smoothing=0.7, group_tag=group_label
+            group_df, surface='Top', damping=0.6, pos_boost=4.6,alpha_smoothing=1.0, group_tag=group_label
         )
         bot_model, bot_metrics = run_surface_pipeline(
-            group_df, surface='Bot', damping=0.5, pos_boost=3, alpha_smoothing=0.7, group_tag=group_label
+            group_df, surface='Bot', damping=0.6, pos_boost=4.6, alpha_smoothing=1.0, group_tag=group_label
         )
         trained_models[(group_label, 'Top')] = top_model
         trained_models[(group_label, 'Bot')] = bot_model

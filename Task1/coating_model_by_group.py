@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,6 +8,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
+import argparse
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -23,6 +25,38 @@ MIN_GROUP_SAMPLES = 200
 # Setpoint 分组用的两个字段（上下表面镀层重量下限设定值）
 TOP_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min'
 BOT_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min'
+
+
+# ==========================================
+# 0. 分组参数表（按 组+表面 覆盖训练参数）
+# ==========================================
+GROUP_PARAMS_PATH = "group_params.json"
+
+DEFAULT_PARAMS = {
+    "damping": 0.6,
+    "pos_boost": 4.6,
+    "alpha_smoothing": 1.0,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+}
+
+
+def load_group_params(path=GROUP_PARAMS_PATH):
+    """读取按 (规格组, 表面) 覆盖的参数表，找不到文件就全部使用默认参数"""
+    if not os.path.exists(path):
+        print(f"[提示] 未找到 {path}，全部使用默认参数。")
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_params_for(group_params, group_label, surface):
+    """取某个 (组, 表面) 的参数，缺失字段回退到默认值"""
+    key = f"{group_label}__{surface}"
+    override = group_params.get(key, {})
+    merged = {**DEFAULT_PARAMS, **override}
+    return merged
 
 
 # ==========================================
@@ -170,11 +204,15 @@ class ResidualCorrectionModel:
     """
 
     def __init__(self, monotonic_feature_idx=None, alpha_smoothing=0.7,
-                 pos_boost=1.0, damping=0.0):
+                 pos_boost=1.0, damping=0.0,
+                 max_iter=200, learning_rate=0.05, max_depth=4):
         self.alpha_smoothing = alpha_smoothing
         self.pos_boost = pos_boost
         self.damping = damping
         self.monotonic_feature_idx = monotonic_feature_idx
+        self.max_iter = max_iter
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
         self.model = None
 
     def _build_model(self, n_features):
@@ -183,9 +221,9 @@ class ResidualCorrectionModel:
             monotonic_cst = [0] * n_features
             monotonic_cst[self.monotonic_feature_idx] = -1
         self.model = HistGradientBoostingRegressor(
-            max_iter=200,
-            learning_rate=0.05,
-            max_depth=4,
+            max_iter=self.max_iter,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
             loss='absolute_error',
             monotonic_cst=monotonic_cst,
             random_state=42
@@ -207,30 +245,28 @@ class ResidualCorrectionModel:
 
 
 # ==========================================
-# 4. 表面建模与图形输出（新增 group_tag 用于区分不同镀层规格组）
+# 4. 纯计算：切分数据 + 训练 + 算 metrics（不画图，供调参脚本和正式训练共用）
 # ==========================================
-def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
-                         pos_boost=1.0, group_tag=""):
+def fit_and_evaluate_surface(df, surface, params, group_tag=""):
+    """
+    纯计算部分：切分数据、训练模型、算 metrics，不画图不存图。
+    调参(Optuna)和正式训练(画图版 run_surface_pipeline)都调用这个函数，
+    保证两边逻辑完全一致。
+
+    返回:
+        corrector: 训练好的 ResidualCorrectionModel
+        metrics: dict，各项评估指标
+        aux: dict，画图需要的中间变量
+    """
     prefix = 'Top' if surface == 'Top' else 'Bot'
     surface_cn = '上' if surface == 'Top' else '下'
-    tag_display = f"[{group_tag}] " if group_tag else ""
-    safe_tag = f"_{group_tag}" if group_tag else ""
 
-    print(f"\n==========================================")
-    print(f"    开始运行【{tag_display}{surface_cn}表面】模型拟合与分析     ")
-    print(f"        (damping={damping}, alpha_smoothing={alpha_smoothing})")
-    print(f"==========================================")
-
-    # 1. 相关性分析
-    analyze_correlations(df, surface=surface, group_tag=group_tag)
-
-    # 2. 特征工程
+    df = df.copy()
     speed_col = 'Speed[m/min]_Process_Avg'
     current_col = f'{prefix}_Current_Sum'
     df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
 
     online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
-
     feature_cols = [
         online_col,
         current_col,
@@ -241,29 +277,27 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
         'Dimension_[mm]_Thickness',
         'Steel_Grade_Encoded'
     ]
-    # online_feature_idx = feature_cols.index(online_col)
-    online_feature_idx=None
 
     X = df[feature_cols]
-
     delta_col = f'{prefix}_Delta'
     y_delta = df[delta_col]
     online_actual = df[online_col]
     y_true_full = df[f'{surface_cn}表面镀层重量A(XA1_0)']
 
-    # 3. 按时间划分 (保持原始索引 Index 不重置)
+    # 按时间划分 (保持原始索引 Index 不重置)
     X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
         train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
 
-    # 4. 残差建模 + 单调约束 + EWMA平滑
     corrector = ResidualCorrectionModel(
-        monotonic_feature_idx=online_feature_idx,
-        alpha_smoothing=alpha_smoothing,
-        pos_boost=pos_boost,
-        damping=damping
+        monotonic_feature_idx=None,
+        alpha_smoothing=params["alpha_smoothing"],
+        pos_boost=params["pos_boost"],
+        damping=params["damping"],
+        max_iter=params["max_iter"],
+        learning_rate=params["learning_rate"],
+        max_depth=params["max_depth"],
     )
     corrector.fit(X_train, y_delta_train)
-
     pred_series, predicted_delta_smooth = corrector.predict_smooth(X_test, actual_test)
 
     y_true_series = y_true_test
@@ -272,79 +306,13 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
     raw_residuals = y_true_series - online_series
     model_residuals = y_true_series - pred_series
 
-    print(f"\n-------- 【{tag_display}{surface_cn}表面 模型矫正前后残差诊断】 --------")
     mask_pos = (raw_residuals > 0)
     mask_neg = (raw_residuals < 0)
-
-    if mask_pos.sum() > 0:
-        mae_raw_pos = raw_residuals[mask_pos].abs().mean()
-        mae_model_pos = model_residuals[mask_pos].abs().mean()
-        print(
-            f"当原始在线偏低 (残差 > 0, 样本数 {mask_pos.sum()}): 原始 MAE = {mae_raw_pos:.4f}  -->  模型矫正后 MAE = {mae_model_pos:.4f}")
-
-    if mask_neg.sum() > 0:
-        mae_raw_neg = raw_residuals[mask_neg].abs().mean()
-        mae_model_neg = model_residuals[mask_neg].abs().mean()
-        print(
-            f"当原始在线偏高 (残差 < 0, 样本数 {mask_neg.sum()}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
-    print("------------------------------------------------------\n")
 
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
     rmse_online = np.sqrt(mean_squared_error(y_true_series, online_series))
     rmse_model = np.sqrt(mean_squared_error(y_true_series, pred_series))
-
-    print(f"======== 【{tag_display}{surface_cn}表面 拟合性能评估（测试集）】 ========")
-    print(f"原始在线仪表与实验室真实值 -> R²: {r2_online:.4f}, RMSE: {rmse_online:.4f}")
-    print(f"模型校正拟合后与实验室真实值 -> R²: {r2_model:.4f}, RMSE: {rmse_model:.4f}")
-
-    start_idx = X_test.index[0]
-    end_idx = X_test.index[-1]
-
-    # 5. 拟合对比图
-    plt.figure(figsize=(12, 5))
-    plt.plot(y_true_series, label='实验室真实测量值 (True Label)', color='black', linewidth=1.5)
-    plt.plot(online_series, label='在线仪表原始测量值 (Online)', color='red', linestyle='--', alpha=0.7)
-    plt.plot(pred_series, label='模型残差校正值 (Model Pred)', color='green', linewidth=1.5, alpha=0.85)
-    plt.title(f'{tag_display}{surface_cn}表面 镀层重量拟合对照图（原始数据行号: {start_idx} ~ {end_idx}）')
-    plt.xlabel('原始数据行号 (Original Row Index)')
-    plt.ylabel('镀层重量 (g/m2)')
-    plt.legend()
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.tight_layout()
-
-    fit_img_path = f"result/grouped_by_coating_weight/fitting_result/fitting_result/fitting_result_{surface}{safe_tag}.png"
-    plt.savefig(fit_img_path, dpi=300)
-    print(f"[图表保存] {tag_display}{surface_cn}表面拟合对照图已保存至: {fit_img_path}")
-    plt.close()
-
-    # 6. 残差对比图
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
-
-    ax1.plot(raw_residuals, label='原始在线仪表残差 (True - Online)', color='red', alpha=0.5, linewidth=1)
-    ax1.plot(model_residuals, label='模型校正后残差 (True - Model)', color='green', alpha=0.8, linewidth=1.2)
-    ax1.axhline(0, color='black', linestyle='--', linewidth=1)
-    ax1.set_title(f'{tag_display}{surface_cn}表面 预测残差变化对比（原始数据行号: {start_idx} ~ {end_idx}）')
-    ax1.set_xlabel('原始数据行号 (Original Row Index)')
-    ax1.set_ylabel('残差/误差 (g/m2)')
-    ax1.legend()
-    ax1.grid(True, linestyle=':', alpha=0.6)
-
-    sns.histplot(raw_residuals, ax=ax2, color='red', label='原始残差分布', kde=True, stat="density", alpha=0.3)
-    sns.histplot(model_residuals, ax=ax2, color='green', label='模型校正后残差分布', kde=True, stat="density",
-                 alpha=0.5)
-    ax2.axvline(0, color='black', linestyle='--', linewidth=1)
-    ax2.set_title(f'{tag_display}{surface_cn}表面 残差概率密度分布（越集中在0且越窄越好）')
-    ax2.set_xlabel('残差/误差 (g/m2)')
-    ax2.set_ylabel('概率密度')
-    ax2.legend()
-    ax2.grid(True, linestyle=':', alpha=0.6)
-
-    plt.tight_layout()
-    res_img_path = f"result/grouped_by_coating_weight/fitting_result/residual_analysis/residual_analysis_{surface}{safe_tag}.png"
-    plt.savefig(res_img_path, dpi=300)
-    print(f"[图表保存] {tag_display}{surface_cn}表面残差分析图已保存至: {res_img_path}")
-    plt.close()
 
     metrics = {
         '规格组': group_tag,
@@ -369,33 +337,153 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7,
         '负偏差MAE_模型': model_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else np.nan,
     }
 
+    aux = dict(
+        X_test=X_test,
+        y_true_series=y_true_series,
+        online_series=online_series,
+        pred_series=pred_series,
+        raw_residuals=raw_residuals,
+        model_residuals=model_residuals,
+    )
+    return corrector, metrics, aux
+
+
+# ==========================================
+# 5. 表面建模与图形输出（薄壳：相关性分析 + 调用纯计算 + 画图）
+# ==========================================
+def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
+    surface_cn = '上' if surface == 'Top' else '下'
+    tag_display = f"[{group_tag}] " if group_tag else ""
+    safe_tag = f"_{group_tag}" if group_tag else ""
+
+    params = get_params_for(group_params or {}, group_tag, surface)
+
+    print(f"\n==========================================")
+    print(f"    开始运行【{tag_display}{surface_cn}表面】模型拟合与分析     ")
+    print(f"        使用参数: {params}")
+    print(f"==========================================")
+
+    # 1. 相关性分析
+    analyze_correlations(df, surface=surface, group_tag=group_tag)
+
+    # 2. 纯计算：切分、训练、算指标
+    corrector, metrics, aux = fit_and_evaluate_surface(df, surface, params, group_tag=group_tag)
+
+    X_test = aux['X_test']
+    y_true_series = aux['y_true_series']
+    online_series = aux['online_series']
+    pred_series = aux['pred_series']
+    raw_residuals = aux['raw_residuals']
+    model_residuals = aux['model_residuals']
+
+    mask_pos = (raw_residuals > 0)
+    mask_neg = (raw_residuals < 0)
+
+    print(f"\n-------- 【{tag_display}{surface_cn}表面 模型矫正前后残差诊断】 --------")
+    if mask_pos.sum() > 0:
+        mae_raw_pos = raw_residuals[mask_pos].abs().mean()
+        mae_model_pos = model_residuals[mask_pos].abs().mean()
+        print(
+            f"当原始在线偏低 (残差 > 0, 样本数 {mask_pos.sum()}): 原始 MAE = {mae_raw_pos:.4f}  -->  模型矫正后 MAE = {mae_model_pos:.4f}")
+    if mask_neg.sum() > 0:
+        mae_raw_neg = raw_residuals[mask_neg].abs().mean()
+        mae_model_neg = model_residuals[mask_neg].abs().mean()
+        print(
+            f"当原始在线偏高 (残差 < 0, 样本数 {mask_neg.sum()}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
+    print("------------------------------------------------------\n")
+
+    print(f"======== 【{tag_display}{surface_cn}表面 拟合性能评估（测试集）】 ========")
+    print(f"原始在线仪表与实验室真实值 -> R²: {metrics['R2_在线']:.4f}, RMSE: {metrics['RMSE_在线']:.4f}")
+    print(f"模型校正拟合后与实验室真实值 -> R²: {metrics['R2_模型']:.4f}, RMSE: {metrics['RMSE_模型']:.4f}")
+
+    start_idx = X_test.index[0]
+    end_idx = X_test.index[-1]
+
+    # 3. 拟合对比图
+    plt.figure(figsize=(12, 5))
+    plt.plot(y_true_series, label='实验室真实测量值 (True Label)', color='black', linewidth=1.5)
+    plt.plot(online_series, label='在线仪表原始测量值 (Online)', color='red', linestyle='--', alpha=0.7)
+    plt.plot(pred_series, label='模型残差校正值 (Model Pred)', color='green', linewidth=1.5, alpha=0.85)
+    plt.title(f'{tag_display}{surface_cn}表面 镀层重量拟合对照图（原始数据行号: {start_idx} ~ {end_idx}）')
+    plt.xlabel('原始数据行号 (Original Row Index)')
+    plt.ylabel('镀层重量 (g/m2)')
+    plt.legend()
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.tight_layout()
+
+    fit_img_path = f"result/grouped_by_coating_weight/fitting_result/fitting_result/fitting_result_{surface}{safe_tag}.png"
+    os.makedirs(os.path.dirname(fit_img_path), exist_ok=True)
+    plt.savefig(fit_img_path, dpi=300)
+    print(f"[图表保存] {tag_display}{surface_cn}表面拟合对照图已保存至: {fit_img_path}")
+    plt.close()
+
+    # 4. 残差对比图
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
+
+    ax1.plot(raw_residuals, label='原始在线仪表残差 (True - Online)', color='red', alpha=0.5, linewidth=1)
+    ax1.plot(model_residuals, label='模型校正后残差 (True - Model)', color='green', alpha=0.8, linewidth=1.2)
+    ax1.axhline(0, color='black', linestyle='--', linewidth=1)
+    ax1.set_title(f'{tag_display}{surface_cn}表面 预测残差变化对比（原始数据行号: {start_idx} ~ {end_idx}）')
+    ax1.set_xlabel('原始数据行号 (Original Row Index)')
+    ax1.set_ylabel('残差/误差 (g/m2)')
+    ax1.legend()
+    ax1.grid(True, linestyle=':', alpha=0.6)
+
+    sns.histplot(raw_residuals, ax=ax2, color='red', label='原始残差分布', kde=True, stat="density", alpha=0.3)
+    sns.histplot(model_residuals, ax=ax2, color='green', label='模型校正后残差分布', kde=True, stat="density",
+                 alpha=0.5)
+    ax2.axvline(0, color='black', linestyle='--', linewidth=1)
+    ax2.set_title(f'{tag_display}{surface_cn}表面 残差概率密度分布（越集中在0且越窄越好）')
+    ax2.set_xlabel('残差/误差 (g/m2)')
+    ax2.set_ylabel('概率密度')
+    ax2.legend()
+    ax2.grid(True, linestyle=':', alpha=0.6)
+
+    plt.tight_layout()
+    res_img_path = f"result/grouped_by_coating_weight/fitting_result/residual_analysis/residual_analysis_{surface}{safe_tag}.png"
+    os.makedirs(os.path.dirname(res_img_path), exist_ok=True)
+    plt.savefig(res_img_path, dpi=300)
+    print(f"[图表保存] {tag_display}{surface_cn}表面残差分析图已保存至: {res_img_path}")
+    plt.close()
+
     return corrector, metrics
 
 
 # ==========================================
-# 5. 主流程：按镀层规格分组，逐组训练 Top/Bot 模型
+# 6. 主流程：按镀层规格分组，逐组训练 Top/Bot 模型
 # ==========================================
 if __name__ == "__main__":
-    raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
 
-    # 实例化清洗器（参数可根据业务灵活调整）
-    cleaner = SteelDataCleaner(
-        min_speed=20.0,
-        max_range_abs=0.4,  # 限制 Max - Min 差值不能超过 0.4 g/m2
-        max_range_ratio=0.3,  # 限制波动比例不超过 30%
-        mad_factor=3.0
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--groups", nargs="*", default=None,
+        help="只训练指定的规格组标签（可传多个），不传则训练全部达标组"
     )
+    args = parser.parse_args()
 
-    # 完成全部清洗与导出
-    clean_df = cleaner.process(
-        raw_df,
-        clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-        filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
-    )
+    # raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+    # # 实例化清洗器（参数可根据业务灵活调整）
+    # cleaner = SteelDataCleaner(
+    #     min_speed=20.0,
+    #     max_range_abs=0.4,  # 限制 Max - Min 差值不能超过 0.4 g/m2
+    #     max_range_ratio=0.3,  # 限制波动比例不超过 30%
+    #     mad_factor=3.0
+    # )
+    # # 完成全部清洗与导出
+    # clean_df = cleaner.process(
+    #     raw_df,
+    #     clean_save_path="result/cleaned_data/cleaned_data.xlsx",
+    #     filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
+    # )
+    clean_df=pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+
 
     # 步骤 2: 按 (Top_Min, Bot_Min) 精确组合构建镀层规格分组
     clean_df = build_setpoint_group_key(clean_df)
     group_sizes = summarize_setpoint_groups(clean_df)
+
+    # 读取按 (组, 表面) 覆盖的训练参数，找不到文件则全部使用默认参数
+    group_params = load_group_params()
 
     # 全量数据整体的残差分布诊断（作为对照基线，可选保留）
     check_residual_distribution(clean_df, group_tag="全部规格汇总")
@@ -403,25 +491,30 @@ if __name__ == "__main__":
     trained_models = {}
     all_metrics = []
 
+    if args.groups:
+        target_labels = set(args.groups)
+        missing = target_labels - set(group_sizes.index)
+        if missing:
+            print(f"[警告] 以下指定的规格组在数据中不存在，将被忽略: {missing}")
+        group_sizes = group_sizes[group_sizes.index.isin(target_labels)]
+        print(f"[提示] 仅训练指定的 {len(group_sizes)} 个规格组: {list(group_sizes.index)}")
+
     # 步骤 3: 逐个镀层规格组，分别训练 Top / Bot 模型
     for group_label, group_size in group_sizes.items():
         group_df = clean_df[clean_df['Setpoint_Group_Label'] == group_label].copy()
 
         if group_size < MIN_GROUP_SAMPLES:
             print(f"[跳过] 规格组 {group_label} 样本量 {group_size} < {MIN_GROUP_SAMPLES}，不做建模与诊断。")
-            # print(f"[跳过建模] 规格组 {group_label} 样本量 {group_size} < {MIN_GROUP_SAMPLES}，"
-            #       f"仅做残差分布诊断，不单独训练模型。")
-            # check_residual_distribution(group_df, group_tag=group_label)
             continue
 
         print(f"\n########## 规格组 {group_label} (样本量 {group_size}) 开始建模 ##########")
         check_residual_distribution(group_df, group_tag=group_label)
 
         top_model, top_metrics = run_surface_pipeline(
-            group_df, surface='Top', damping=0.6, pos_boost=4.6,alpha_smoothing=1.0, group_tag=group_label
+            group_df, surface='Top', group_tag=group_label, group_params=group_params
         )
         bot_model, bot_metrics = run_surface_pipeline(
-            group_df, surface='Bot', damping=0.6, pos_boost=4.6, alpha_smoothing=1.0, group_tag=group_label
+            group_df, surface='Bot', group_tag=group_label, group_params=group_params
         )
         trained_models[(group_label, 'Top')] = top_model
         trained_models[(group_label, 'Bot')] = bot_model
@@ -431,6 +524,7 @@ if __name__ == "__main__":
     print("\n==========================================")
     print(f"全部规格组处理完毕，共成功训练 {len(trained_models)} 个模型（每组 Top/Bot 各一个）。")
     print("==========================================")
+
     # 导出样本量汇总表 + 建模效果汇总表到同一个 Excel 的不同 sheet
     sample_summary_df = group_sizes.reset_index()
     sample_summary_df.columns = ['规格组', '样本数']
@@ -438,7 +532,8 @@ if __name__ == "__main__":
         lambda s: '建模' if s >= MIN_GROUP_SAMPLES else '跳过'
     )
 
-    report_path = "result/grouped_by_coating_weight/summary_report.xlsx"
+    report_path = "result/grouped_by_coating_weight/summary_report_group.xlsx"
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
         sample_summary_df.to_excel(writer, sheet_name='样本量汇总', index=False)
         if all_metrics:

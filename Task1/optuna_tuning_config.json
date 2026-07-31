@@ -1,7 +1,7 @@
 {
   "data_path": "result/cleaned_data/cleaned_data.xlsx",
   "min_samples": 200,
-  "n_trials": 30,
+  "n_trials": 40,
   "groups": [
     "Top2.799_Bot2.799",
     "Top2.0_Bot2.0",

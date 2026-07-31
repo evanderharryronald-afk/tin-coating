@@ -25,148 +25,148 @@
   },
   "group_params_override": {
     "Top2.799_Bot2.799__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.1108,
+      "pos_boost": 4.4368,
+      "alpha_smoothing": 0.9139,
+      "max_iter": 300,
+      "learning_rate": 0.0704,
+      "max_depth": 5
     },
     "Top2.799_Bot2.799__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.4365,
+      "pos_boost": 4.2191,
+      "alpha_smoothing": 0.9015,
+      "max_iter": 450,
+      "learning_rate": 0.0231,
+      "max_depth": 5
     },
     "Top2.0_Bot2.0__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
+      "damping": 0.1779,
+      "pos_boost": 6.91,
+      "alpha_smoothing": 0.4621,
+      "max_iter": 150,
+      "learning_rate": 0.116,
       "max_depth": 8
     },
     "Top2.0_Bot2.0__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.2124,
+      "pos_boost": 2.99,
+      "alpha_smoothing": 0.4592,
+      "max_iter": 150,
+      "learning_rate": 0.1658,
+      "max_depth": 4
     },
     "Top1.1_Bot1.1__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.0859,
+      "pos_boost": 1.0365,
+      "alpha_smoothing": 0.6205,
+      "max_iter": 500,
+      "learning_rate": 0.0221,
+      "max_depth": 5
     },
     "Top1.1_Bot1.1__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
+      "damping": 0.0269,
+      "pos_boost": 4.8243,
+      "alpha_smoothing": 0.527,
       "max_iter": 200,
-      "learning_rate": 0.04,
+      "learning_rate": 0.0281,
       "max_depth": 8
     },
     "Top2.799_Bot1.1__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
+      "damping": 0.7794,
+      "pos_boost": 5.9377,
+      "alpha_smoothing": 0.9342,
+      "max_iter": 150,
+      "learning_rate": 0.0124,
       "max_depth": 8
     },
     "Top2.799_Bot1.1__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.3063,
+      "pos_boost": 2.8166,
+      "alpha_smoothing": 0.9412,
+      "max_iter": 250,
+      "learning_rate": 0.118,
+      "max_depth": 3
     },
     "Top2.2_Bot2.2__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
+      "damping": 0.7673,
+      "pos_boost": 5.5591,
+      "alpha_smoothing": 0.7109,
+      "max_iter": 500,
+      "learning_rate": 0.0529,
       "max_depth": 8
     },
     "Top2.2_Bot2.2__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.8279,
+      "pos_boost": 5.4667,
+      "alpha_smoothing": 0.6041,
+      "max_iter": 350,
+      "learning_rate": 0.1342,
+      "max_depth": 5
     },
     "Top2.2_Bot1.7__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.683,
+      "pos_boost": 1.7696,
+      "alpha_smoothing": 0.4898,
+      "max_iter": 300,
+      "learning_rate": 0.0957,
+      "max_depth": 6
     },
     "Top2.2_Bot1.7__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.4669,
+      "pos_boost": 1.2456,
+      "alpha_smoothing": 0.3156,
+      "max_iter": 500,
+      "learning_rate": 0.0879,
+      "max_depth": 4
     },
     "Top2.0_Bot5.0__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.5927,
+      "pos_boost": 1.6888,
+      "alpha_smoothing": 0.8214,
+      "max_iter": 450,
+      "learning_rate": 0.0116,
+      "max_depth": 3
     },
     "Top2.0_Bot5.0__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.1397,
+      "pos_boost": 2.3272,
+      "alpha_smoothing": 0.9966,
+      "max_iter": 350,
+      "learning_rate": 0.0898,
+      "max_depth": 6
     },
     "Top1.1_Bot2.799__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.2277,
+      "pos_boost": 3.6524,
+      "alpha_smoothing": 0.7995,
+      "max_iter": 250,
+      "learning_rate": 0.0543,
+      "max_depth": 7
     },
     "Top1.1_Bot2.799__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.7115,
+      "pos_boost": 2.778,
+      "alpha_smoothing": 0.4222,
+      "max_iter": 500,
+      "learning_rate": 0.0354,
+      "max_depth": 3
     },
     "Top1.1_Bot2.2__Top": {
-      "damping": 0.28,
-      "pos_boost": 1.33,
-      "alpha_smoothing": 0.93,
-      "max_iter": 350,
-      "learning_rate": 0.072,
-      "max_depth": 8
+      "damping": 0.9429,
+      "pos_boost": 4.3581,
+      "alpha_smoothing": 0.9174,
+      "max_iter": 150,
+      "learning_rate": 0.0142,
+      "max_depth": 3
     },
     "Top1.1_Bot2.2__Bot": {
-      "damping": 0.67,
-      "pos_boost": 7.88,
-      "alpha_smoothing": 0.83,
-      "max_iter": 200,
-      "learning_rate": 0.04,
-      "max_depth": 8
+      "damping": 0.484,
+      "pos_boost": 1.0033,
+      "alpha_smoothing": 0.9476,
+      "max_iter": 350,
+      "learning_rate": 0.0868,
+      "max_depth": 3
     }
   }
 }

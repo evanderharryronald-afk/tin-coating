@@ -9,8 +9,7 @@ from optuna.visualization import (
 )
 
 from coating_model_by_group import (
-    build_setpoint_group_key, fit_and_evaluate_surface, load_group_params,
-    GROUP_PARAMS_PATH, DEFAULT_PARAMS
+    build_setpoint_group_key, fit_and_evaluate_surface
 )
 from data_cleaner import SteelDataCleaner
 
@@ -124,26 +123,6 @@ def tune_one(group_df, group_label, surface, n_trials):
 
     return study, out_dir, best_trials_df
 
-
-def write_back_params(group_label, surface, trial_number, tag_dir):
-    """人工看完图选好 trial_number 之后，调这个函数把参数写回 group_params.json"""
-    best_trials_df = pd.read_excel(os.path.join(tag_dir, "best_trials.xlsx"))
-    row = best_trials_df[best_trials_df["trial_number"] == trial_number]
-    if row.empty:
-        raise ValueError(f"trial_number {trial_number} 不在 best_trials 里，请检查 best_trials.xlsx")
-    row = row.iloc[0]
-
-    params = {k: row[k] for k in DEFAULT_PARAMS.keys()}
-    for k in ["max_iter", "max_depth"]:
-        params[k] = int(params[k])
-
-    group_params = load_group_params()
-    key = f"{group_label}__{surface}"
-    group_params[key] = params
-
-    with open(GROUP_PARAMS_PATH, "w", encoding="utf-8") as f:
-        json.dump(group_params, f, ensure_ascii=False, indent=2)
-    print(f"[写回完成] {key} -> {params}")
 
 
 if __name__ == "__main__":

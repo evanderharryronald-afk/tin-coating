@@ -76,11 +76,18 @@ class ResidualCorrectionModel:
     """
 
     def __init__(self, monotonic_feature_idx=None, alpha_smoothing=0.7,
-                 pos_boost=1.0, damping=0.0):
+                 pos_boost=1.0, damping=0.0, learning_rate=0.05,
+                 max_iter=200, max_depth=4, **kwargs):
         self.alpha_smoothing = alpha_smoothing
         self.pos_boost = pos_boost
         self.damping = damping
         self.monotonic_feature_idx = monotonic_feature_idx
+
+        # 增加树模型参数控制
+        self.learning_rate = learning_rate
+        self.max_iter = max_iter
+        self.max_depth = max_depth
+        self.kwargs = kwargs  # 接收其它可能的额外参数
         self.model = None
 
     def _build_model(self, n_features):
@@ -88,13 +95,15 @@ class ResidualCorrectionModel:
         if self.monotonic_feature_idx is not None:
             monotonic_cst = [0] * n_features
             monotonic_cst[self.monotonic_feature_idx] = -1
+
         self.model = HistGradientBoostingRegressor(
-            max_iter=200,
-            learning_rate=0.05,
-            max_depth=4,
+            max_iter=self.max_iter,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
             loss='absolute_error',
             monotonic_cst=monotonic_cst,
-            random_state=42
+            random_state=42,
+            **self.kwargs
         )
 
     def fit(self, X, y_delta):
@@ -115,16 +124,33 @@ class ResidualCorrectionModel:
 # ==========================================
 # 4. 表面建模与图形输出
 # ==========================================
-def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7, pos_boost=1.0):
+def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     """
-    damping=0.0, alpha_smoothing=0.7 为网格搜索得到的默认生产配置。
+    params: 包含各种超参数的字典，如：
+            {
+                'damping': 0.6, 'pos_boost': 4.6, 'alpha_smoothing': 1.0,
+                'learning_rate': 0.05, 'max_iter': 200, 'max_depth': 4
+            }
     """
     prefix = 'Top' if surface == 'Top' else 'Bot'
     surface_cn = '上' if surface == 'Top' else '下'
 
+    # 合并默认参数与自定义参数
+    default_config = {
+        'damping': 0.0,
+        'alpha_smoothing': 0.7,
+        'pos_boost': 1.0,
+        'learning_rate': 0.05,
+        'max_iter': 200,
+        'max_depth': 4
+    }
+    if params is not None:
+        default_config.update(params)
+    default_config.update(kwargs)  # 允许直接用关键字参数覆盖
+
     print(f"\n==========================================")
     print(f"        开始运行【{surface_cn}表面】模型拟合与分析     ")
-    print(f"        (damping={damping}, alpha_smoothing={alpha_smoothing})")
+    print(f"        配置参数: {default_config}")
     print(f"==========================================")
 
     # 1. 相关性分析（直接调用模块）
@@ -164,12 +190,11 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7, po
     X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
         train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
 
-    # 4. 残差建模 + 单调约束 + EWMA平滑（方向加权默认关闭）
+    # 4. 残差建模 + 单调约束 + EWMA平滑
+    # 将 default_config 解包传入 ResidualCorrectionModel
     corrector = ResidualCorrectionModel(
         monotonic_feature_idx=online_feature_idx,
-        alpha_smoothing=alpha_smoothing,
-        pos_boost=pos_boost,
-        damping=damping
+        **default_config
     )
     corrector.fit(X_train, y_delta_train)
 
@@ -303,26 +328,57 @@ def run_surface_pipeline(df, surface='Top', damping=0.0, alpha_smoothing=0.7, po
 # 5. 主流程
 # ==========================================
 if __name__ == "__main__":
-    raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+    # raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+    #
+    # cleaner = SteelDataCleaner(
+    #     min_speed=20.0,
+    #     max_range_abs=0.4,
+    #     max_range_ratio=0.3,
+    #     mad_factor=3.0
+    # )
+    #
+    # clean_df = cleaner.process(
+    #     raw_df,
+    #     clean_save_path="result/cleaned_data/cleaned_data.xlsx",
+    #     filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
+    # )
 
-    # 实例化清洗器（参数可根据业务灵活调整）
-    cleaner = SteelDataCleaner(
-        min_speed=20.0,
-        max_range_abs=0.4,  # 限制 Max - Min 差值不能超过 0.4 g/m2
-        max_range_ratio=0.3,  # 限制波动比例不超过 30%
-        mad_factor=3.0
-    )
-
-    # 完成全部清洗与导出
-    clean_df = cleaner.process(
-        raw_df,
-        clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-        filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
-    )
-
-    # 运行单独排查
+    clean_df=pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
     check_residual_distribution(clean_df)
 
-    # 步骤 2: 分别训练上/下表面模型
-    run_surface_pipeline(clean_df, surface='Top', damping=0.6, pos_boost=4.6, alpha_smoothing=1.0)
-    run_surface_pipeline(clean_df, surface='Bot', damping=0.6, pos_boost=4.6, alpha_smoothing=1.0)
+    # -------------------------------------------------------------
+    # 方式 A：定义参数字典（推荐，便于对接 JSON 配置文件或 Optuna 调参）
+    # -------------------------------------------------------------
+    top_params = {
+        "damping": 0.28,
+        "pos_boost": 1.33,
+        "alpha_smoothing": 0.93,
+        "learning_rate": 0.072,  # Optuna优化后的学习率
+        "max_iter": 350,  # Optuna优化后的树数量
+        "max_depth": 8  # Optuna优化后的树最大深度
+    }
+
+    bot_params = {
+        "damping": 0.67,
+        "pos_boost": 7.88,
+        "alpha_smoothing": 0.83,
+        "learning_rate": 0.04,  # Optuna优化后的学习率
+        "max_iter": 200,  # Optuna优化后的树数量
+        "max_depth": 8  # Optuna优化后的树最大深度
+    }
+    run_surface_pipeline(clean_df, surface='Top', params=top_params)
+    run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+
+    # # -------------------------------------------------------------
+    # # 方式 B：直接用关键字参数修改
+    # # -------------------------------------------------------------
+    # run_surface_pipeline(
+    #     clean_df,
+    #     surface='Bot',
+    #     damping=0.6,
+    #     pos_boost=4.6,
+    #     alpha_smoothing=1.0,
+    #     learning_rate=0.02,
+    #     max_iter=250,
+    #     max_depth=4
+    # )

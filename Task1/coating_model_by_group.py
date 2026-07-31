@@ -349,9 +349,9 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
     overall_mae_model = model_residuals.abs().mean()
     overall_mae_online = raw_residuals.abs().mean()
 
-    # 2. 根据模型修正后的残差划分为正/负偏差
-    mask_pos = (model_residuals > 0)
-    mask_neg = (model_residuals < 0)
+    # 根据原始在线偏差划分
+    mask_pos = (raw_residuals > 0)
+    mask_neg = (raw_residuals < 0)
 
     # 3. 安全计算正/负偏差 MAE（若某一方样本数为0，则优雅降级为 overall_mae_model，绝不返回 nan 或 inf）
     pos_mae_model = model_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_model
@@ -573,12 +573,24 @@ if __name__ == "__main__":
         lambda s: '建模' if s >= MIN_GROUP_SAMPLES else '跳过'
     )
 
-    report_path = "result/grouped_by_coating_weight/summary_report_group.xlsx"
+    report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
         sample_summary_df.to_excel(writer, sheet_name='样本量汇总', index=False)
         if all_metrics:
             metrics_df = pd.DataFrame(all_metrics)
+            # ==========================================
+            # 针对 Excel 报表的针对性置空清洗
+            # 当正/负偏差样本数为 0 时，将其 MAE 设为 np.nan (导出 Excel 即为空白)
+            # ==========================================
+            mask_pos_zero = (metrics_df['正偏差样本数'] == 0)
+            metrics_df.loc[mask_pos_zero, '正偏差MAE_在线'] = np.nan
+            metrics_df.loc[mask_pos_zero, '正偏差MAE_模型'] = np.nan
+
+            mask_neg_zero = (metrics_df['负偏差样本数'] == 0)
+            metrics_df.loc[mask_neg_zero, '负偏差MAE_在线'] = np.nan
+            metrics_df.loc[mask_neg_zero, '负偏差MAE_模型'] = np.nan
+            # ==========================================
             metrics_df.to_excel(writer, sheet_name='建模效果汇总', index=False)
         else:
             pd.DataFrame({'提示': ['没有达标组完成建模']}).to_excel(

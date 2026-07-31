@@ -30,7 +30,8 @@ BOT_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min'
 # ==========================================
 # 0. 分组参数表（按 组+表面 覆盖训练参数）
 # ==========================================
-GROUP_PARAMS_PATH = "group_params.json"
+# GROUP_PARAMS_PATH = "group_params_all_the_same.json"
+GROUP_PARAMS_PATH = "group_params_optimum_for_each.json"
 
 DEFAULT_PARAMS = {
     "damping": 0.6,
@@ -42,14 +43,32 @@ DEFAULT_PARAMS = {
 }
 
 
-def load_group_params(path=GROUP_PARAMS_PATH):
-    """读取按 (规格组, 表面) 覆盖的参数表，找不到文件就全部使用默认参数"""
-    if not os.path.exists(path):
-        print(f"[提示] 未找到 {path}，全部使用默认参数。")
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_pipeline_config(config_path="config.json"):
+    """读取统一的 JSON 配置文件，并提供合理的默认兜底值"""
+    default_config = {
+        "target_groups": None,  # None 表示自动跑全部达标组
+        "min_group_samples": 200,
+        "default_params": {
+            "damping": 0.6,
+            "pos_boost": 4.6,
+            "alpha_smoothing": 1.0,
+            "max_iter": 200,
+            "learning_rate": 0.05,
+            "max_depth": 4,
+        },
+        "group_params_override": {}
+    }
 
+    if not os.path.exists(config_path):
+        print(f"[提示] 配置文件 {config_path} 不存在，使用内置默认参数。")
+        return default_config
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        user_config = json.load(f)
+
+    # 深度合并/更新配置
+    default_config.update(user_config)
+    return default_config
 
 def get_params_for(group_params, group_label, surface):
     """取某个 (组, 表面) 的参数，缺失字段回退到默认值"""
@@ -57,6 +76,25 @@ def get_params_for(group_params, group_label, surface):
     override = group_params.get(key, {})
     merged = {**DEFAULT_PARAMS, **override}
     return merged
+
+
+def get_params_for_group(config, group_label, surface):
+    """
+    根据组名和表面获取最终模型参数
+    优先级：group_params_override[组名__表面] > default_params
+    """
+    # 1. 基础默认参数
+    base_params = config.get("default_params", {}).copy()
+
+    # 2. 查找是否有特定组+表面的覆盖配置
+    key = f"{group_label}__{surface}"
+    override_params = config.get("group_params_override", {}).get(key, {})
+
+    # 3. 合并字典（override_params 会覆盖 base_params 中的同名键）
+    base_params.update(override_params)
+
+    return base_params
+
 
 
 # ==========================================
@@ -303,11 +341,24 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
     y_true_series = y_true_test
     online_series = actual_test
 
+    # 算模型残差
     raw_residuals = y_true_series - online_series
     model_residuals = y_true_series - pred_series
 
-    mask_pos = (raw_residuals > 0)
-    mask_neg = (raw_residuals < 0)
+    # 1. 整体 MAE
+    overall_mae_model = model_residuals.abs().mean()
+    overall_mae_online = raw_residuals.abs().mean()
+
+    # 2. 根据模型修正后的残差划分为正/负偏差
+    mask_pos = (model_residuals > 0)
+    mask_neg = (model_residuals < 0)
+
+    # 3. 安全计算正/负偏差 MAE（若某一方样本数为0，则优雅降级为 overall_mae_model，绝不返回 nan 或 inf）
+    pos_mae_model = model_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_model
+    neg_mae_model = model_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_model
+
+    pos_mae_online = raw_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_online
+    neg_mae_online = raw_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_online
 
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
@@ -324,17 +375,17 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         'R2_提升': r2_model - r2_online,
         'RMSE_在线': rmse_online,
         'RMSE_模型': rmse_model,
-        'RMSE_提升(%)': (rmse_online - rmse_model) / rmse_online * 100 if rmse_online != 0 else np.nan,
-        'MAE_在线': raw_residuals.abs().mean(),
-        'MAE_模型': model_residuals.abs().mean(),
+        'RMSE_提升(%)': (rmse_online - rmse_model) / rmse_online * 100 if rmse_online != 0 else 0.0,
+        'MAE_在线': overall_mae_online,
+        'MAE_模型': overall_mae_model,
         '偏差均值_在线': raw_residuals.mean(),
         '偏差均值_模型': model_residuals.mean(),
         '正偏差样本数': int(mask_pos.sum()),
-        '正偏差MAE_在线': raw_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else np.nan,
-        '正偏差MAE_模型': model_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else np.nan,
+        '正偏差MAE_在线': pos_mae_online,
+        '正偏差MAE_模型': pos_mae_model,
         '负偏差样本数': int(mask_neg.sum()),
-        '负偏差MAE_在线': raw_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else np.nan,
-        '负偏差MAE_模型': model_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else np.nan,
+        '负偏差MAE_在线': neg_mae_online,
+        '负偏差MAE_模型': neg_mae_model,
     }
 
     aux = dict(
@@ -453,74 +504,64 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
 # 6. 主流程：按镀层规格分组，逐组训练 Top/Bot 模型
 # ==========================================
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="镀层重量分规格组模型训练脚本")
+    # parser.add_argument(                                           ## 所有组都使用同样的超参数，即对Top2.799_Bot2.799最优的超参数
+    #     "--config", type=str, default="group_params_all_the_same.json",
+    #     help="配置文件 JSON 路径 (默认: group_params_all_the_same.json)"
+    # )
     parser.add_argument(
-        "--groups", nargs="*", default=None,
-        help="只训练指定的规格组标签（可传多个），不传则训练全部达标组"
+        "--config", type=str, default="group_params_optimum_for_each.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+        help="配置文件 JSON 路径 (默认: group_params_optimum_for_each.json)"
     )
     args = parser.parse_args()
 
-    # raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
-    # # 实例化清洗器（参数可根据业务灵活调整）
-    # cleaner = SteelDataCleaner(
-    #     min_speed=20.0,
-    #     max_range_abs=0.4,  # 限制 Max - Min 差值不能超过 0.4 g/m2
-    #     max_range_ratio=0.3,  # 限制波动比例不超过 30%
-    #     mad_factor=3.0
-    # )
-    # # 完成全部清洗与导出
-    # clean_df = cleaner.process(
-    #     raw_df,
-    #     clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-    #     filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
-    # )
-    clean_df=pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+    # 1. 加载统一配置
+    config = load_pipeline_config(args.config)
+    MIN_GROUP_SAMPLES = config.get("min_group_samples", 200)
 
-
-    # 步骤 2: 按 (Top_Min, Bot_Min) 精确组合构建镀层规格分组
+    # 2. 读取数据并分组汇总
+    clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/cleaned_data/cleaned_data.xlsx"))
     clean_df = build_setpoint_group_key(clean_df)
     group_sizes = summarize_setpoint_groups(clean_df)
 
-    # 读取按 (组, 表面) 覆盖的训练参数，找不到文件则全部使用默认参数
-    group_params = load_group_params()
+    # 3. 过滤要运行的目标规格组
+    target_groups = config.get("target_groups")
+    if target_groups:
+        target_set = set(target_groups)
+        # 仅保留 JSON 里面配置且在数据中存在的组
+        group_sizes = group_sizes[group_sizes.index.isin(target_set)]
+        print(f"[配置生效] 根据 JSON 配置，仅运行指定的 {len(group_sizes)} 个规格组。")
+    else:
+        print("[配置生效] 未在 JSON 中指定 target_groups，将运行所有样本量达标的规格组。")
 
-    # 全量数据整体的残差分布诊断（作为对照基线，可选保留）
-    check_residual_distribution(clean_df, group_tag="全部规格汇总")
-
+    # 4. 逐组训练
     trained_models = {}
     all_metrics = []
 
-    if args.groups:
-        target_labels = set(args.groups)
-        missing = target_labels - set(group_sizes.index)
-        if missing:
-            print(f"[警告] 以下指定的规格组在数据中不存在，将被忽略: {missing}")
-        group_sizes = group_sizes[group_sizes.index.isin(target_labels)]
-        print(f"[提示] 仅训练指定的 {len(group_sizes)} 个规格组: {list(group_sizes.index)}")
-
-    # 步骤 3: 逐个镀层规格组，分别训练 Top / Bot 模型
     for group_label, group_size in group_sizes.items():
-        group_df = clean_df[clean_df['Setpoint_Group_Label'] == group_label].copy()
-
         if group_size < MIN_GROUP_SAMPLES:
-            print(f"[跳过] 规格组 {group_label} 样本量 {group_size} < {MIN_GROUP_SAMPLES}，不做建模与诊断。")
+            print(f"[跳过] 规格组 {group_label} 样本量 {group_size} < {MIN_GROUP_SAMPLES}")
             continue
 
-        print(f"\n########## 规格组 {group_label} (样本量 {group_size}) 开始建模 ##########")
-        check_residual_distribution(group_df, group_tag=group_label)
+        group_df = clean_df[clean_df['Setpoint_Group_Label'] == group_label].copy()
+
+        # 分别获取 Top / Bot 的参数（自动处理了默认值 + 覆盖值）
+        top_params = get_params_for_group(config, group_label, 'Top')
+        bot_params = get_params_for_group(config, group_label, 'Bot')
 
         top_model, top_metrics = run_surface_pipeline(
-            group_df, surface='Top', group_tag=group_label, group_params=group_params
+            group_df, surface='Top', group_tag=group_label, group_params=top_params
         )
         bot_model, bot_metrics = run_surface_pipeline(
-            group_df, surface='Bot', group_tag=group_label, group_params=group_params
+            group_df, surface='Bot', group_tag=group_label, group_params=bot_params
         )
+
         trained_models[(group_label, 'Top')] = top_model
         trained_models[(group_label, 'Bot')] = bot_model
         all_metrics.append(top_metrics)
         all_metrics.append(bot_metrics)
 
+    # 5. 导出结果报表...
     print("\n==========================================")
     print(f"全部规格组处理完毕，共成功训练 {len(trained_models)} 个模型（每组 Top/Bot 各一个）。")
     print("==========================================")

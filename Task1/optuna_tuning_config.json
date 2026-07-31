@@ -1,0 +1,16 @@
+{
+  "data_path": "result/cleaned_data/cleaned_data.xlsx",
+  "min_samples": 200,
+  "n_trials": 30,
+  "groups": [
+    "Top2.799_Bot2.799",
+    "Top2.0_Bot2.0",
+    "Top1.1_Bot1.1",
+    "Top2.799_Bot1.1",
+    "Top2.2_Bot2.2",
+    "Top2.2_Bot1.7",
+    "Top2.0_Bot5.0",
+    "Top1.1_Bot2.799",
+    "Top1.1_Bot2.2"
+  ]
+}

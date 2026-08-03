@@ -407,7 +407,7 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
     tag_display = f"[{group_tag}] " if group_tag else ""
     safe_tag = f"_{group_tag}" if group_tag else ""
 
-    params = get_params_for(group_params or {}, group_tag, surface)
+    params = group_params or DEFAULT_PARAMS
 
     print(f"\n==========================================")
     print(f"    开始运行【{tag_display}{surface_cn}表面】模型拟合与分析     ")

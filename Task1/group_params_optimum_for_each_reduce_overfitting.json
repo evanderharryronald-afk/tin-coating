@@ -1,0 +1,172 @@
+{
+  "target_groups": [
+    "Top2.799_Bot2.799",
+    "Top2.0_Bot2.0",
+    "Top1.1_Bot1.1",
+    "Top2.799_Bot1.1",
+    "Top2.2_Bot2.2",
+    "Top2.2_Bot1.7",
+    "Top2.0_Bot5.0",
+    "Top1.1_Bot2.799",
+    "Top1.1_Bot2.2"
+  ],
+  "min_group_samples": 200,
+  "data_paths": {
+    "clean_data": "result/cleaned_data/cleaned_data.xlsx",
+    "report_output": "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
+  },
+  "default_params": {
+    "damping": 0.6,
+    "pos_boost": 4.6,
+    "alpha_smoothing": 1.0,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 4
+  },
+  "group_params_override": {
+    "Top2.799_Bot2.799__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.799_Bot2.799__Bot": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.0_Bot2.0__Top": {
+    "damping": 0.1779,
+    "pos_boost": 6.91,
+    "alpha_smoothing": 0.4621,
+    "max_iter": 150,
+    "learning_rate": 0.116,
+    "max_depth": 8
+  },
+  "Top2.0_Bot2.0__Bot": {
+    "damping": 0.2124,
+    "pos_boost": 2.99,
+    "alpha_smoothing": 0.4592,
+    "max_iter": 150,
+    "learning_rate": 0.1658,
+    "max_depth": 4
+  },
+  "Top1.1_Bot1.1__Top": {
+    "damping": 0.0859,
+    "pos_boost": 1.0365,
+    "alpha_smoothing": 0.6205,
+    "max_iter": 500,
+    "learning_rate": 0.0221,
+    "max_depth": 5
+  },
+  "Top1.1_Bot1.1__Bot": {
+    "damping": 0.0269,
+    "pos_boost": 4.8243,
+    "alpha_smoothing": 0.527,
+    "max_iter": 200,
+    "learning_rate": 0.0281,
+    "max_depth": 8
+  },
+  "Top2.799_Bot1.1__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.799_Bot1.1__Bot": {
+    "damping": 0.3063,
+    "pos_boost": 2.8166,
+    "alpha_smoothing": 0.9412,
+    "max_iter": 250,
+    "learning_rate": 0.118,
+    "max_depth": 3
+  },
+  "Top2.2_Bot2.2__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.2_Bot2.2__Bot": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.2_Bot1.7__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.2_Bot1.7__Bot": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.0_Bot5.0__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top2.0_Bot5.0__Bot": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top1.1_Bot2.799__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top1.1_Bot2.799__Bot": {
+    "damping": 0.7115,
+    "pos_boost": 2.778,
+    "alpha_smoothing": 0.4222,
+    "max_iter": 500,
+    "learning_rate": 0.0354,
+    "max_depth": 3
+  },
+  "Top1.1_Bot2.2__Top": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  },
+  "Top1.1_Bot2.2__Bot": {
+    "damping": 0.75,
+    "pos_boost": 2.0,
+    "alpha_smoothing": 0.7,
+    "max_iter": 200,
+    "learning_rate": 0.05,
+    "max_depth": 3
+  }
+  }
+}

@@ -336,14 +336,19 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         max_depth=params["max_depth"],
     )
     corrector.fit(X_train, y_delta_train)
-    pred_series, predicted_delta_smooth = corrector.predict_smooth(X_test, actual_test)
 
+    # ========== 测试集预测 ==========
+    pred_series, _ = corrector.predict_smooth(X_test, actual_test)
     y_true_series = y_true_test
     online_series = actual_test
 
-    # 算模型残差
     raw_residuals = y_true_series - online_series
     model_residuals = y_true_series - pred_series
+
+    # ========== 训练集预测（新增）==========
+    pred_train, _ = corrector.predict_smooth(X_train, actual_train)
+    raw_residuals_train = y_true_train - actual_train
+    model_residuals_train = y_true_train - pred_train
 
     # 1. 整体 MAE
     overall_mae_model = model_residuals.abs().mean()
@@ -360,32 +365,78 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
     pos_mae_online = raw_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_online
     neg_mae_online = raw_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_online
 
+    # 原来的测试集指标保持不变 ...
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
     rmse_online = np.sqrt(mean_squared_error(y_true_series, online_series))
     rmse_model = np.sqrt(mean_squared_error(y_true_series, pred_series))
+
+    # ========== 训练集指标（新增）==========
+    r2_online_train = r2_score(y_true_train, actual_train)
+    r2_model_train = r2_score(y_true_train, pred_train)
+    rmse_online_train = np.sqrt(mean_squared_error(y_true_train, actual_train))
+    rmse_model_train = np.sqrt(mean_squared_error(y_true_train, pred_train))
+    mae_model_train = model_residuals_train.abs().mean()
+    mae_online_train = raw_residuals_train.abs().mean()
+
+    # 过拟合程度（R²_train - R²_test），正值越大说明过拟合越严重
+    overfitting_r2 = r2_model_train - r2_model
+
+    # 新增：MAE / RMSE 过拟合相关指标
+    overfitting_mae = mae_model_train - overall_mae_model  # 训练MAE - 测试MAE（通常为负或接近0）
+    overfitting_rmse = rmse_model_train - rmse_model
+    mae_ratio = overall_mae_model / (mae_model_train + 1e-8)  # 测试MAE / 训练MAE（>1 表示测试更差）
+    rmse_ratio = rmse_model / (rmse_model_train + 1e-8)
+
+
+
 
     metrics = {
         '规格组': group_tag,
         '表面': surface,
         '训练样本数': len(X_train),
         '测试样本数': len(X_test),
-        'R2_在线': r2_online,
-        'R2_模型': r2_model,
-        'R2_提升': r2_model - r2_online,
-        'RMSE_在线': rmse_online,
-        'RMSE_模型': rmse_model,
-        'RMSE_提升(%)': (rmse_online - rmse_model) / rmse_online * 100 if rmse_online != 0 else 0.0,
-        'MAE_在线': overall_mae_online,
-        'MAE_模型': overall_mae_model,
-        '偏差均值_在线': raw_residuals.mean(),
-        '偏差均值_模型': model_residuals.mean(),
-        '正偏差样本数': int(mask_pos.sum()),
-        '正偏差MAE_在线': pos_mae_online,
-        '正偏差MAE_模型': pos_mae_model,
-        '负偏差样本数': int(mask_neg.sum()),
-        '负偏差MAE_在线': neg_mae_online,
-        '负偏差MAE_模型': neg_mae_model,
+
+        # ---- 训练集 ----
+        'R2_在线_训练': r2_online_train,
+        'R2_模型_训练': r2_model_train,
+        'R2_提升_训练': r2_model_train - r2_online_train,
+        'RMSE_在线_训练': rmse_online_train,
+        'RMSE_模型_训练': rmse_model_train,
+        'RMSE_提升_训练': rmse_model_train - rmse_online_train,
+        'MAE_在线_训练': mae_online_train,
+        'MAE_模型_训练': mae_model_train,
+        'MAE_提升_训练': mae_model_train - mae_online_train,
+
+        # ---- 测试集（原来的）----
+        'R2_在线_测试': r2_online,
+        'R2_模型_测试': r2_model,
+        'R2_提升_测试': r2_model - r2_online,
+        'RMSE_在线_测试': rmse_online,
+        'RMSE_模型_测试': rmse_model,
+        'RMSE_提升_测试(%)': (rmse_online - rmse_model) / rmse_online * 100 if rmse_online != 0 else 0.0,
+        'MAE_在线_测试': overall_mae_online,
+        'MAE_模型_测试': overall_mae_model,
+        'MAE_提升_测试': overall_mae_model-overall_mae_online,
+        '偏差均值_在线_测试': raw_residuals.mean(),
+        '偏差均值_模型_测试': model_residuals.mean(),
+        '偏差均值_提升_测试': model_residuals.mean()-raw_residuals.mean(),
+        '正偏差样本数_测试': int(mask_pos.sum()),
+        '正偏差MAE_在线_测试': pos_mae_online,
+        '正偏差MAE_模型_测试': pos_mae_model,
+        '正偏差MAE_提升_测试': pos_mae_model-pos_mae_online,
+        '负偏差样本数_测试': int(mask_neg.sum()),
+        '负偏差MAE_在线_测试': neg_mae_online,
+        '负偏差MAE_模型_测试': neg_mae_model,
+        '负偏差MAE_提升_测试': neg_mae_model-neg_mae_online,
+
+        # ---- 过拟合程度（新增）----
+        '过拟合程度_R2': overfitting_r2,  # R2_train - R2_test
+        '过拟合程度_MAE': overfitting_mae,  # train - test
+        '过拟合程度_RMSE': overfitting_rmse,  # train - test
+        'MAE比值_测试/训练': mae_ratio,
+        'RMSE比值_测试/训练': rmse_ratio,
+
     }
 
     aux = dict(
@@ -395,6 +446,9 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         pred_series=pred_series,
         raw_residuals=raw_residuals,
         model_residuals=model_residuals,
+        # 新增训练集残差，供画图使用
+        raw_residuals_train=raw_residuals_train,
+        model_residuals_train=model_residuals_train,
     )
     return corrector, metrics, aux
 
@@ -426,6 +480,9 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
     pred_series = aux['pred_series']
     raw_residuals = aux['raw_residuals']
     model_residuals = aux['model_residuals']
+    # 新增
+    raw_residuals_train = aux['raw_residuals_train']
+    model_residuals_train = aux['model_residuals_train']
 
     mask_pos = (raw_residuals > 0)
     mask_neg = (raw_residuals < 0)
@@ -443,9 +500,14 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
             f"当原始在线偏高 (残差 < 0, 样本数 {mask_neg.sum()}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
     print("------------------------------------------------------\n")
 
-    print(f"======== 【{tag_display}{surface_cn}表面 拟合性能评估（测试集）】 ========")
-    print(f"原始在线仪表与实验室真实值 -> R²: {metrics['R2_在线']:.4f}, RMSE: {metrics['RMSE_在线']:.4f}")
-    print(f"模型校正拟合后与实验室真实值 -> R²: {metrics['R2_模型']:.4f}, RMSE: {metrics['RMSE_模型']:.4f}")
+    print(f"======== 【{tag_display}{surface_cn}表面 拟合性能评估】 ========")
+    print(f"【训练集】")
+    print( f"  原始在线 -> R²: {metrics['R2_在线_训练']:.4f}, RMSE: {metrics['RMSE_在线_训练']:.4f}, MAE: {metrics['MAE_在线_训练']:.4f}")
+    print(f"  模型校正 -> R²: {metrics['R2_模型_训练']:.4f}, RMSE: {metrics['RMSE_模型_训练']:.4f}, MAE: {metrics['MAE_模型_训练']:.4f}")
+    print(f"【测试集】")
+    print(f"  原始在线 -> R²: {metrics['R2_在线_测试']:.4f}, RMSE: {metrics['RMSE_在线_测试']:.4f}, MAE: {metrics['MAE_在线_测试']:.4f}")
+    print(f"  模型校正 -> R²: {metrics['R2_模型_测试']:.4f}, RMSE: {metrics['RMSE_模型_测试']:.4f}, MAE: {metrics['MAE_模型_测试']:.4f}")
+
 
     start_idx = X_test.index[0]
     end_idx = X_test.index[-1]
@@ -497,6 +559,41 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
     print(f"[图表保存] {tag_display}{surface_cn}表面残差分析图已保存至: {res_img_path}")
     plt.close()
 
+    # ========== 5. 新增：训练集 vs 测试集 残差分布对比图 ==========
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # 左图：原始在线残差（True - Online）
+    sns.histplot(raw_residuals_train, ax=axes[0], color='orange', label='训练集 原始残差',
+                 kde=True, stat="density", alpha=0.4)
+    sns.histplot(raw_residuals, ax=axes[0], color='red', label='测试集 原始残差',
+                 kde=True, stat="density", alpha=0.4)
+    axes[0].axvline(0, color='black', linestyle='--', linewidth=1)
+    axes[0].set_title(f'{tag_display}{surface_cn}表面 原始在线残差分布\n(训练集 vs 测试集)')
+    axes[0].set_xlabel('残差 (True - Online) g/m2')
+    axes[0].set_ylabel('概率密度')
+    axes[0].legend()
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+
+    # 右图：模型校正后残差（True - Model）
+    sns.histplot(model_residuals_train, ax=axes[1], color='cyan', label='训练集 模型残差',
+                 kde=True, stat="density", alpha=0.4)
+    sns.histplot(model_residuals, ax=axes[1], color='green', label='测试集 模型残差',
+                 kde=True, stat="density", alpha=0.4)
+    axes[1].axvline(0, color='black', linestyle='--', linewidth=1)
+    axes[1].set_title(f'{tag_display}{surface_cn}表面 模型校正后残差分布\n(训练集 vs 测试集)')
+    axes[1].set_xlabel('残差 (True - Model) g/m2')
+    axes[1].set_ylabel('概率密度')
+    axes[1].legend()
+    axes[1].grid(True, linestyle=':', alpha=0.6)
+
+    plt.tight_layout()
+    dist_img_path = (f"result/grouped_by_coating_weight/fitting_result/"
+                     f"residual_train_vs_test/residual_train_vs_test_{surface}{safe_tag}.png")
+    os.makedirs(os.path.dirname(dist_img_path), exist_ok=True)
+    plt.savefig(dist_img_path, dpi=300)
+    print(f"[图表保存] {tag_display}{surface_cn}表面 训练集vs测试集残差分布对比图已保存至: {dist_img_path}")
+    plt.close()
+
     return corrector, metrics
 
 
@@ -513,6 +610,12 @@ if __name__ == "__main__":
         "--config", type=str, default="group_params_optimum_for_each.json",  ## 使用Optuna对各组搜索出来的最优的超参数
         help="配置文件 JSON 路径 (默认: group_params_optimum_for_each.json)"
     )
+    # parser.add_argument(
+    #     "--config", type=str, default="group_params_optimum_for_each_reduce_overfitting.json",  ## 降低模型过拟合的超参数配置
+    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_reduce_overfitting.json)"
+    # )
+
+
     args = parser.parse_args()
 
     # 1. 加载统一配置
@@ -574,6 +677,8 @@ if __name__ == "__main__":
     )
 
     report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_reducing_overfitting.xlsx"  # 降低过拟合
+
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
         sample_summary_df.to_excel(writer, sheet_name='样本量汇总', index=False)
@@ -583,13 +688,13 @@ if __name__ == "__main__":
             # 针对 Excel 报表的针对性置空清洗
             # 当正/负偏差样本数为 0 时，将其 MAE 设为 np.nan (导出 Excel 即为空白)
             # ==========================================
-            mask_pos_zero = (metrics_df['正偏差样本数'] == 0)
-            metrics_df.loc[mask_pos_zero, '正偏差MAE_在线'] = np.nan
-            metrics_df.loc[mask_pos_zero, '正偏差MAE_模型'] = np.nan
+            mask_pos_zero = (metrics_df['正偏差样本数_测试'] == 0)
+            metrics_df.loc[mask_pos_zero, '正偏差MAE_在线_测试'] = np.nan
+            metrics_df.loc[mask_pos_zero, '正偏差MAE_模型_测试'] = np.nan
 
-            mask_neg_zero = (metrics_df['负偏差样本数'] == 0)
-            metrics_df.loc[mask_neg_zero, '负偏差MAE_在线'] = np.nan
-            metrics_df.loc[mask_neg_zero, '负偏差MAE_模型'] = np.nan
+            mask_neg_zero = (metrics_df['负偏差样本数_测试'] == 0)
+            metrics_df.loc[mask_neg_zero, '负偏差MAE_在线_测试'] = np.nan
+            metrics_df.loc[mask_neg_zero, '负偏差MAE_模型_测试'] = np.nan
             # ==========================================
             metrics_df.to_excel(writer, sheet_name='建模效果汇总', index=False)
         else:

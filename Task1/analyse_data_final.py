@@ -8,7 +8,6 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
 from correlation_analyzer import SurfaceCorrelationAnalyzer
-from residual_drift_diagnosis import build_setpoint_group_key, analyze_one
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False

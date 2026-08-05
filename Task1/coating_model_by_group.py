@@ -13,6 +13,7 @@ from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from correlation_analyzer import SurfaceCorrelationAnalyzer
+from model_interpreter import ModelInterpreter   # ===== 模型解释性分析 =====
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -747,6 +748,39 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     plt.savefig(dist_img_path, dpi=300)
     print(f"[图表保存] {tag_display}{surface_cn}表面 训练集vs测试集残差分布对比图已保存至: {dist_img_path}")
     plt.close()
+
+    # ===== 模型解释性分析 =====
+    # 特征列需要与 fit_and_evaluate_surface 里保持一致
+    prefix = 'Top' if surface == 'Top' else 'Bot'
+    feature_cols = [
+        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',
+        f'{prefix}_Current_Sum',
+        f'{prefix}_Current_Per_Speed',
+        f'{prefix}_Theoretical_Factor',
+        'Speed[m/min]_Process_Avg',
+        'Dimension_[mm]_Width',
+        'Dimension_[mm]_Thickness',
+        'Steel_Grade_Encoded'
+    ]
+
+    interp_dir = f"result/grouped_by_coating_weight/interpretation/{group_tag}_{surface}"
+    interpreter = ModelInterpreter(
+        model=corrector,  # 直接传包装类即可，内部会取 .model
+        X=aux.get('X_train', X_test),  # 优先用训练集
+        feature_names=feature_cols,
+        save_dir=interp_dir,
+        max_samples_for_shap=500,
+    )
+
+    # 一键跑完（也可单独调用某个方法）
+    interpreter.full_analysis(
+        y=None,  # 如果想做 permutation，需要把 y_delta_train 也从 aux 里带出来
+        run_permutation=False,  # 暂时可先关掉，等 aux 补全 y 再开
+        run_shap=True,
+        run_pdp=True,
+        pdp_features=feature_cols[:5],
+    )
+
 
     return corrector, metrics
 

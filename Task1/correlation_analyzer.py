@@ -43,11 +43,15 @@ class SurfaceCorrelationAnalyzer:
 
         actual_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
         lab_col = f'{surface_cn}表面镀层重量A(XA1_0)'
+        speed_col = 'Speed[m/min]_Process_Avg'
+        current_col = f'{prefix}_Current_Sum'
+        df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
 
         cols_to_check = [
             lab_col,
             actual_col,
             f'{prefix}_Current_Sum',
+            f'{prefix}_Current_Per_Speed',
             f'{prefix}_Theoretical_Factor',
             'Speed[m/min]_Process_Avg',
             'Dimension_[mm]_Thickness',

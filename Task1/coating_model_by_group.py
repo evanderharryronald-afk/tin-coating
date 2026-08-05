@@ -12,6 +12,7 @@ import argparse
 from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
+from correlation_analyzer import SurfaceCorrelationAnalyzer
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -144,45 +145,6 @@ def summarize_setpoint_groups(df):
     print("==========================================\n")
 
     return group_sizes
-
-
-# ==========================================
-# 2. 相关性分析
-# ==========================================
-def analyze_correlations(df, surface='Top', group_tag=""):
-    prefix = 'Top' if surface == 'Top' else 'Bot'
-    surface_cn = '上' if surface == 'Top' else '下'
-
-    actual_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
-    lab_col = f'{surface_cn}表面镀层重量A(XA1_0)'
-
-    cols_to_check = [
-        lab_col,
-        actual_col,
-        f'{prefix}_Current_Sum',
-        f'{prefix}_Theoretical_Factor',
-        'Speed[m/min]_Process_Avg',
-        'Dimension_[mm]_Thickness',
-        'Dimension_[mm]_Width',
-        'Steel_Grade_Encoded'
-    ]
-
-    corr_matrix = df[cols_to_check].corr()
-
-    tag_display = f"[{group_tag}] " if group_tag else ""
-    print(f"\n======== 【{tag_display}{surface_cn}表面 相关性矩阵】 ========")
-    print(corr_matrix[lab_col].sort_values(ascending=False))
-
-    plt.figure(figsize=(9, 7))
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", vmin=-1, vmax=1)
-    plt.title(f'{tag_display}{surface_cn}表面参数与实验室测定值相关性热力图')
-    plt.tight_layout()
-
-    safe_tag = f"_{group_tag}" if group_tag else ""
-    save_img_path = f"result/grouped_by_coating_weight/correlation_result/correlation_{surface}{safe_tag}.png"
-    plt.savefig(save_img_path, dpi=300)
-    print(f"[图表保存] {tag_display}{surface_cn}表面相关性热力图已保存至: {save_img_path}")
-    plt.close()
 
 
 def check_residual_distribution(df, group_tag=""):
@@ -647,7 +609,16 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     print(f"==========================================")
 
     # 1. 相关性分析
-    analyze_correlations(df, surface=surface, group_tag=group_tag)
+    save_dir = f"result/grouped_by_coating_weight/correlation_result/correlation_result{safe_tag}"
+    analyzer = SurfaceCorrelationAnalyzer(default_save_dir=save_dir)
+    analyzer.analyze_surface(
+        df, 
+        surface=surface, 
+        extra_cols=None,
+        save_dir=save_dir,
+        corr_method='both',  # 同时输出 Pearson 和 Spearman
+        compute_mi=True      # 计算 Mutual Information
+    )
 
     # 2. 纯计算：切分、训练、算指标
     corrector, metrics, aux = fit_and_evaluate_surface(

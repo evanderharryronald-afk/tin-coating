@@ -25,11 +25,6 @@ class SteelDataCleaner:
 
         df = df.copy()
 
-        # 0. 纠正列名（如存在）
-        if 'Tining Section_CONCENT[NTU]_GL_1_Avg' in df.columns:
-            df.rename(columns={'Tining Section_CONCENT[NTU]_GL_1_Avg': 'Tining Section_CURRENT[A]_GL_1_Avg'},
-                      inplace=True)
-
         # 1. 电流与理论因子构建
         bot_curr_cols = [f'Tining Section_CURRENT[A]_GL_{i}_Avg' for i in range(1, 37, 2)]
         top_curr_cols = [f'Tining Section_CURRENT[A]_GL_{i}_Avg' for i in range(2, 37, 2)]
@@ -161,3 +156,14 @@ class SteelDataCleaner:
         print("==========================================\n")
 
         return clean_df
+
+if __name__ == "__main__":
+    raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+
+    # 步骤 1: 创建清洗器实例，进行预处理、诊断离群点并自动导出 filtered_outliers.xlsx
+    cleaner = SteelDataCleaner()
+    clean_df = cleaner.process(
+        raw_df,
+        clean_save_path="result/cleaned_data/cleaned_data.xlsx",
+        filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
+    )

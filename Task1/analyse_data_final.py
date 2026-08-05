@@ -8,6 +8,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
 from correlation_analyzer import SurfaceCorrelationAnalyzer
+from residual_drift_diagnosis import build_setpoint_group_key, analyze_one
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
@@ -16,28 +17,6 @@ plt.rcParams['axes.unicode_minus'] = False
 os.makedirs("result/cleaned_data", exist_ok=True)
 os.makedirs("result/correlation_result", exist_ok=True)
 os.makedirs("result/fitting_result", exist_ok=True)
-
-
-
-def check_residual_distribution(df):
-    """单独排查数据集残差分布状况的辅助函数"""
-    print("\n==========================================")
-    print("      【数据集中原始残差正负分布诊断】       ")
-    print("==========================================")
-    for surface in ['Top', 'Bot']:
-        surface_cn = '上' if surface == 'Top' else '下'
-        delta_col = f'{surface}_Delta'
-        if delta_col in df.columns:
-            total = len(df[delta_col].dropna())
-            pos = (df[delta_col] > 0).sum()
-            neg = (df[delta_col] < 0).sum()
-            mean_val = df[delta_col].mean()
-            print(f"[{surface_cn}表面 Delta (实验室值 - 在线值)]")
-            print(f"  - 总有效样本数: {total}")
-            print(f"  - Delta > 0 (在线测量偏低): {pos} 条 (占比 {pos/total*100:.2f}%)")
-            print(f"  - Delta < 0 (在线测量偏高): {neg} 条 (占比 {neg/total*100:.2f}%)")
-            print(f"  - Delta 均值: {mean_val:.4f} g/m2")
-    print("==========================================\n")
 
 
 # ==========================================
@@ -344,7 +323,6 @@ if __name__ == "__main__":
     # )
 
     clean_df=pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
-    check_residual_distribution(clean_df)
 
     # -------------------------------------------------------------
     # 方式 A：定义参数字典（推荐，便于对接 JSON 配置文件或 Optuna 调参）

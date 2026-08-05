@@ -9,6 +9,9 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
 import argparse
+from sklearn.linear_model import HuberRegressor, Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -238,6 +241,7 @@ def compute_direction_sample_weight(y_delta, pos_boost=1.0, damping=0.0):
 
 class ResidualCorrectionModel:
     """
+    基于 HistGradientBoostingRegressor 的残差矫正模型
     直接对残差 Delta = 真实值 - 在线值 建模，而不是对绝对值建模。
     """
 
@@ -281,19 +285,64 @@ class ResidualCorrectionModel:
         final_pred = online_actual + predicted_delta_smooth
         return final_pred, predicted_delta_smooth
 
+class LinearResidualCorrectionModel:
+    """
+    【新增】基于 Huber 线性回归 + L2 正则的残差矫正模型
+    接口与 ResidualCorrectionModel 保持一致，方便无缝切换。
+    """
+    def __init__(self, alpha_smoothing=0.7, pos_boost=1.0, damping=0.0,
+                 alpha=1.0, epsilon=1.35, **kwargs):
+        self.alpha_smoothing = alpha_smoothing
+        self.pos_boost = pos_boost
+        self.damping = damping
+        self.alpha = alpha       # L2 正则化强度
+        self.epsilon = epsilon   # Huber 损失对异常值的敏感阈值 (1.35 是标准默认值)
+        self.model = None
+
+    def _build_model(self):
+        # 线性模型对量纲敏感，因此封装 StandardScaler 做 Pipeline
+        self.model = make_pipeline(
+            StandardScaler(),
+            HuberRegressor(alpha=self.alpha, epsilon=self.epsilon, max_iter=1000)
+        )
+
+    def fit(self, X, y_delta):
+        self._build_model()
+        sample_weight = compute_direction_sample_weight(
+            y_delta, pos_boost=self.pos_boost, damping=self.damping
+        )
+        # 将样本权重传递给 Pipeline 内的 HuberRegressor
+        self.model.fit(X, y_delta, huberregressor__sample_weight=sample_weight.values)
+
+    def predict_smooth(self, X, online_actual):
+        predicted_delta_raw = self.model.predict(X)
+        delta_series = pd.Series(predicted_delta_raw, index=X.index)
+        predicted_delta_smooth = delta_series.ewm(alpha=self.alpha_smoothing).mean()
+        final_pred = online_actual + predicted_delta_smooth
+        return final_pred, predicted_delta_smooth
+
+
+
+
 
 # ==========================================
 # 4. 纯计算：切分数据 + 训练 + 算 metrics（不画图，供调参脚本和正式训练共用）
 # ==========================================
-def fit_and_evaluate_surface(df, surface, params, group_tag=""):
+def fit_and_evaluate_surface(df, surface, params, group_tag="",
+                             use_expanding_window=False,
+                             train_ratio=0.7,
+                             n_splits=3):
     """
     纯计算部分：切分数据、训练模型、算 metrics，不画图不存图。
-    调参(Optuna)和正式训练(画图版 run_surface_pipeline)都调用这个函数，
-    保证两边逻辑完全一致。
+
+    新增参数:
+        use_expanding_window: True 时使用扩展窗口，False 时保持原来的固定 8:2 时间切分
+        train_ratio: 扩展窗口初始训练集比例（默认 0.7）
+        n_splits: 扩展窗口评估次数（默认 3，最后一次窗口的结果作为最终报告）
 
     返回:
-        corrector: 训练好的 ResidualCorrectionModel
-        metrics: dict，各项评估指标
+        corrector: 训练好的 ResidualCorrectionModel（最后一个窗口训练的）
+        metrics: dict，各项评估指标（固定切分 或 最后一次窗口）
         aux: dict，画图需要的中间变量
     """
     prefix = 'Top' if surface == 'Top' else 'Bot'
@@ -322,56 +371,192 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
     online_actual = df[online_col]
     y_true_full = df[f'{surface_cn}表面镀层重量A(XA1_0)']
 
-    # 按时间划分 (保持原始索引 Index 不重置)
-    X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
-        train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
+    n_samples = len(X)
 
-    corrector = ResidualCorrectionModel(
-        monotonic_feature_idx=None,
-        alpha_smoothing=params["alpha_smoothing"],
-        pos_boost=params["pos_boost"],
-        damping=params["damping"],
-        max_iter=params["max_iter"],
-        learning_rate=params["learning_rate"],
-        max_depth=params["max_depth"],
-    )
-    corrector.fit(X_train, y_delta_train)
+    USE_LINEAR_MODEL = False # 想切回树模型时改这里
+    # USE_LINEAR_MODEL = True
+    ModelClass = LinearResidualCorrectionModel if USE_LINEAR_MODEL else ResidualCorrectionModel
 
-    # ========== 测试集预测 ==========
-    pred_series, _ = corrector.predict_smooth(X_test, actual_test)
-    y_true_series = y_true_test
-    online_series = actual_test
+    if n_samples < 50:
+        # 样本太少，强制退回固定切分，避免窗口逻辑出错
+        use_expanding_window = False
+    # ------------------------------------------------------------------
+    # 分支 1：原来的固定 8:2 时间切分
+    # ------------------------------------------------------------------
+    if not use_expanding_window:
+        X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
+            train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
+        corrector = ModelClass(
+            alpha_smoothing=params["alpha_smoothing"],
+            pos_boost=params["pos_boost"],
+            damping=params["damping"],
+            # 如果用树模型会读取 max_iter/learning_rate，如果用线性模型额外参数会被 **kwargs 吸收，完全兼容
+            max_iter=params.get("max_iter", 200),
+            learning_rate=params.get("learning_rate", 0.05),
+            max_depth=params.get("max_depth", 4),
+        )
+        corrector.fit(X_train, y_delta_train)
 
-    raw_residuals = y_true_series - online_series
-    model_residuals = y_true_series - pred_series
+        # corrector = ResidualCorrectionModel(
+        #     monotonic_feature_idx=None,
+        #     alpha_smoothing=params["alpha_smoothing"],
+        #     pos_boost=params["pos_boost"],
+        #     damping=params["damping"],
+        #     max_iter=params["max_iter"],
+        #     learning_rate=params["learning_rate"],
+        #     max_depth=params["max_depth"],
+        # )
+        # corrector.fit(X_train, y_delta_train)
 
-    # ========== 训练集预测（新增）==========
-    pred_train, _ = corrector.predict_smooth(X_train, actual_train)
-    raw_residuals_train = y_true_train - actual_train
-    model_residuals_train = y_true_train - pred_train
+        # 测试集预测
+        pred_series, _ = corrector.predict_smooth(X_test, actual_test)
+        y_true_series = y_true_test
+        online_series = actual_test
 
-    # 1. 整体 MAE
+        raw_residuals = y_true_series - online_series
+        model_residuals = y_true_series - pred_series
+
+        # 训练集预测
+        pred_train, _ = corrector.predict_smooth(X_train, actual_train)
+        raw_residuals_train = y_true_train - actual_train
+        model_residuals_train = y_true_train - pred_train
+
+    # ------------------------------------------------------------------
+    # 分支 2：扩展窗口（Expanding Window）
+    # ------------------------------------------------------------------
+    else:
+        # 按时间顺序的索引
+        indices = np.arange(n_samples)
+        min_train_size = int(n_samples * train_ratio)
+        remaining = n_samples - min_train_size
+        step = max(remaining // n_splits, 1)
+
+        window_metrics_list = []
+        last_corrector = None
+        last_aux = None
+
+        for i in range(n_splits):
+            train_end = min_train_size + i * step
+            if i == n_splits - 1:
+                # 最后一次窗口：用到倒数第二段训练，最后一段测试
+                train_end = n_samples - max(int(n_samples * 0.15), 20)  # 至少留 15% 或 20 条做测试
+                test_end = n_samples
+            else:
+                test_end = min(train_end + step, n_samples)
+
+            if train_end >= test_end or train_end < 30:
+                continue
+
+            train_idx = indices[:train_end]
+            test_idx = indices[train_end:test_end]
+
+            X_train = X.iloc[train_idx]
+            y_delta_train = y_delta.iloc[train_idx]
+            actual_train = online_actual.iloc[train_idx]
+            y_true_train = y_true_full.iloc[train_idx]
+
+            X_test = X.iloc[test_idx]
+            actual_test = online_actual.iloc[test_idx]
+            y_true_test = y_true_full.iloc[test_idx]
+
+            corrector = ModelClass(
+                alpha_smoothing=params["alpha_smoothing"],
+                pos_boost=params["pos_boost"],
+                damping=params["damping"],
+                max_iter=params.get("max_iter", 200),
+                learning_rate=params.get("learning_rate", 0.05),
+                max_depth=params.get("max_depth", 4),
+            )
+            corrector.fit(X_train, y_delta_train)
+
+            # corrector = ResidualCorrectionModel(
+            #     monotonic_feature_idx=None,
+            #     alpha_smoothing=params["alpha_smoothing"],
+            #     pos_boost=params["pos_boost"],
+            #     damping=params["damping"],
+            #     max_iter=params["max_iter"],
+            #     learning_rate=params["learning_rate"],
+            #     max_depth=params["max_depth"],
+            # )
+            # corrector.fit(X_train, y_delta_train)
+
+            pred_series, _ = corrector.predict_smooth(X_test, actual_test)
+            raw_residuals = y_true_test - actual_test
+            model_residuals = y_true_test - pred_series
+
+            pred_train, _ = corrector.predict_smooth(X_train, actual_train)
+            raw_residuals_train = y_true_train - actual_train
+            model_residuals_train = y_true_train - pred_train
+
+            # 记录本窗口的关键指标（可选，用于后续平均）
+            window_mae = model_residuals.abs().mean()
+            window_metrics_list.append({
+                'window': i + 1,
+                'train_size': len(X_train),
+                'test_size': len(X_test),
+                'mae_model': window_mae,
+                'mae_online': raw_residuals.abs().mean(),
+            })
+
+            # 只保留最后一个窗口的结果作为最终返回
+            last_corrector = corrector
+            last_aux = dict(
+                X_test=X_test,
+                y_true_series=y_true_test,
+                online_series=actual_test,
+                pred_series=pred_series,
+                raw_residuals=raw_residuals,
+                model_residuals=model_residuals,
+                raw_residuals_train=raw_residuals_train,
+                model_residuals_train=model_residuals_train,
+                X_train=X_train,
+                y_true_train=y_true_train,
+                actual_train=actual_train,
+            )
+
+        if last_corrector is None:
+            # 兜底：窗口全部失败时退回固定切分
+            return fit_and_evaluate_surface(df, surface, params, group_tag=group_tag,
+                                            use_expanding_window=False)
+
+        corrector = last_corrector
+        aux_from_window = last_aux
+        X_test = aux_from_window['X_test']
+        y_true_series = aux_from_window['y_true_series']
+        online_series = aux_from_window['online_series']
+        pred_series = aux_from_window['pred_series']
+        raw_residuals = aux_from_window['raw_residuals']
+        model_residuals = aux_from_window['model_residuals']
+        raw_residuals_train = aux_from_window['raw_residuals_train']
+        model_residuals_train = aux_from_window['model_residuals_train']
+        X_train = aux_from_window['X_train']
+        y_true_train = aux_from_window['y_true_train']
+        actual_train = aux_from_window['actual_train']
+
+        # 可选：打印各窗口 MAE，方便诊断
+        if window_metrics_list:
+            print(f"  [扩展窗口] {group_tag}-{surface} 各窗口 MAE: "
+                  + ", ".join([f"W{w['window']}={w['mae_model']:.4f}" for w in window_metrics_list]))
+
+    # ------------------------------------------------------------------
+    # 统一计算指标（固定切分 和 扩展窗口最后一次 共用）
+    # ------------------------------------------------------------------
     overall_mae_model = model_residuals.abs().mean()
     overall_mae_online = raw_residuals.abs().mean()
 
-    # 根据原始在线偏差划分
     mask_pos = (raw_residuals > 0)
     mask_neg = (raw_residuals < 0)
 
-    # 3. 安全计算正/负偏差 MAE（若某一方样本数为0，则优雅降级为 overall_mae_model，绝不返回 nan 或 inf）
     pos_mae_model = model_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_model
     neg_mae_model = model_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_model
-
     pos_mae_online = raw_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_online
     neg_mae_online = raw_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_online
 
-    # 原来的测试集指标保持不变 ...
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
     rmse_online = np.sqrt(mean_squared_error(y_true_series, online_series))
     rmse_model = np.sqrt(mean_squared_error(y_true_series, pred_series))
 
-    # ========== 训练集指标（新增）==========
     r2_online_train = r2_score(y_true_train, actual_train)
     r2_model_train = r2_score(y_true_train, pred_train)
     rmse_online_train = np.sqrt(mean_squared_error(y_true_train, actual_train))
@@ -379,23 +564,18 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
     mae_model_train = model_residuals_train.abs().mean()
     mae_online_train = raw_residuals_train.abs().mean()
 
-    # 过拟合程度（R²_train - R²_test），正值越大说明过拟合越严重
     overfitting_r2 = r2_model_train - r2_model
-
-    # 新增：MAE / RMSE 过拟合相关指标
-    overfitting_mae = mae_model_train - overall_mae_model  # 训练MAE - 测试MAE（通常为负或接近0）
+    overfitting_mae = mae_model_train - overall_mae_model
     overfitting_rmse = rmse_model_train - rmse_model
-    mae_ratio = overall_mae_model / (mae_model_train + 1e-8)  # 测试MAE / 训练MAE（>1 表示测试更差）
+    mae_ratio = overall_mae_model / (mae_model_train + 1e-8)
     rmse_ratio = rmse_model / (rmse_model_train + 1e-8)
-
-
-
 
     metrics = {
         '规格组': group_tag,
         '表面': surface,
         '训练样本数': len(X_train),
         '测试样本数': len(X_test),
+        '使用扩展窗口': use_expanding_window,   # 新增字段，方便报表区分
 
         # ---- 训练集 ----
         'R2_在线_训练': r2_online_train,
@@ -408,7 +588,7 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         'MAE_模型_训练': mae_model_train,
         'MAE_提升_训练': mae_model_train - mae_online_train,
 
-        # ---- 测试集（原来的）----
+        # ---- 测试集 ----
         'R2_在线_测试': r2_online,
         'R2_模型_测试': r2_model,
         'R2_提升_测试': r2_model - r2_online,
@@ -417,26 +597,25 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         'RMSE_提升_测试(%)': (rmse_online - rmse_model) / rmse_online * 100 if rmse_online != 0 else 0.0,
         'MAE_在线_测试': overall_mae_online,
         'MAE_模型_测试': overall_mae_model,
-        'MAE_提升_测试': overall_mae_model-overall_mae_online,
+        'MAE_提升_测试': overall_mae_model - overall_mae_online,
         '偏差均值_在线_测试': raw_residuals.mean(),
         '偏差均值_模型_测试': model_residuals.mean(),
-        '偏差均值_提升_测试': model_residuals.mean()-raw_residuals.mean(),
+        '偏差均值_提升_测试': model_residuals.mean() - raw_residuals.mean(),
         '正偏差样本数_测试': int(mask_pos.sum()),
         '正偏差MAE_在线_测试': pos_mae_online,
         '正偏差MAE_模型_测试': pos_mae_model,
-        '正偏差MAE_提升_测试': pos_mae_model-pos_mae_online,
+        '正偏差MAE_提升_测试': pos_mae_model - pos_mae_online,
         '负偏差样本数_测试': int(mask_neg.sum()),
         '负偏差MAE_在线_测试': neg_mae_online,
         '负偏差MAE_模型_测试': neg_mae_model,
-        '负偏差MAE_提升_测试': neg_mae_model-neg_mae_online,
+        '负偏差MAE_提升_测试': neg_mae_model - neg_mae_online,
 
-        # ---- 过拟合程度（新增）----
-        '过拟合程度_R2': overfitting_r2,  # R2_train - R2_test
-        '过拟合程度_MAE': overfitting_mae,  # train - test
-        '过拟合程度_RMSE': overfitting_rmse,  # train - test
+        # ---- 过拟合程度 ----
+        '过拟合程度_R2': overfitting_r2,
+        '过拟合程度_MAE': overfitting_mae,
+        '过拟合程度_RMSE': overfitting_rmse,
         'MAE比值_测试/训练': mae_ratio,
         'RMSE比值_测试/训练': rmse_ratio,
-
     }
 
     aux = dict(
@@ -446,17 +625,16 @@ def fit_and_evaluate_surface(df, surface, params, group_tag=""):
         pred_series=pred_series,
         raw_residuals=raw_residuals,
         model_residuals=model_residuals,
-        # 新增训练集残差，供画图使用
         raw_residuals_train=raw_residuals_train,
         model_residuals_train=model_residuals_train,
     )
     return corrector, metrics, aux
 
-
 # ==========================================
 # 5. 表面建模与图形输出（薄壳：相关性分析 + 调用纯计算 + 画图）
 # ==========================================
-def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
+def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
+                         use_expanding_window=False, train_ratio=0.7, n_splits=3):
     surface_cn = '上' if surface == 'Top' else '下'
     tag_display = f"[{group_tag}] " if group_tag else ""
     safe_tag = f"_{group_tag}" if group_tag else ""
@@ -472,7 +650,12 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None):
     analyze_correlations(df, surface=surface, group_tag=group_tag)
 
     # 2. 纯计算：切分、训练、算指标
-    corrector, metrics, aux = fit_and_evaluate_surface(df, surface, params, group_tag=group_tag)
+    corrector, metrics, aux = fit_and_evaluate_surface(
+        df, surface, params, group_tag=group_tag,
+        use_expanding_window=use_expanding_window,
+        train_ratio=train_ratio,
+        n_splits=n_splits
+    )
 
     X_test = aux['X_test']
     y_true_series = aux['y_true_series']
@@ -652,11 +835,32 @@ if __name__ == "__main__":
         top_params = get_params_for_group(config, group_label, 'Top')
         bot_params = get_params_for_group(config, group_label, 'Bot')
 
+        # # 高漂移组名单（根据样本数据漂移诊断调整）
+        # HIGH_DRIFT_GROUPS = {
+        #     "Top2.2_Bot2.2",
+        #     "Top2.2_Bot1.7",
+        #     "Top1.1_Bot2.2",
+        #     "Top2.0_Bot5.0",
+        #     "Top1.1_Bot2.799",
+        # }
+        #
+        # use_window = group_label in HIGH_DRIFT_GROUPS
+        #
+        # top_model, top_metrics = run_surface_pipeline(
+        #     group_df, surface='Top', group_tag=group_label, group_params=top_params,
+        #     use_expanding_window=use_window, train_ratio=0.7, n_splits=3
+        # )
+        # bot_model, bot_metrics = run_surface_pipeline(
+        #     group_df, surface='Bot', group_tag=group_label, group_params=bot_params,
+        #     use_expanding_window=use_window, train_ratio=0.7, n_splits=3
+        # )
         top_model, top_metrics = run_surface_pipeline(
-            group_df, surface='Top', group_tag=group_label, group_params=top_params
+            group_df, surface='Top', group_tag=group_label, group_params=top_params,
+            use_expanding_window=False, train_ratio=0.7, n_splits=3
         )
         bot_model, bot_metrics = run_surface_pipeline(
-            group_df, surface='Bot', group_tag=group_label, group_params=bot_params
+            group_df, surface='Bot', group_tag=group_label, group_params=bot_params,
+            use_expanding_window=False, train_ratio=0.7, n_splits=3
         )
 
         trained_models[(group_label, 'Top')] = top_model
@@ -678,6 +882,10 @@ if __name__ == "__main__":
 
     report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_reducing_overfitting.xlsx"  # 降低过拟合
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_expanding_window.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_linear_for_overfitting.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_linear_model.xlsx"
+
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:

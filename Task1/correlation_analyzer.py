@@ -105,7 +105,7 @@ class SurfaceCorrelationAnalyzer:
             save_img_path = os.path.join(out_dir, f"correlation_{surface}_{method}.png")
             plt.savefig(save_img_path, dpi=300)
             print(f"[图表保存] {surface_cn}表面 {method} 相关性热力图已保存至: {save_img_path}")
-            plt.show()
+            # plt.show()
 
         # ====================== 2. Mutual Information ======================
         if compute_mi and lab_col in data.columns:
@@ -136,6 +136,6 @@ class SurfaceCorrelationAnalyzer:
                 save_mi_path = os.path.join(out_dir, f"mi_importance_{surface}.png")
                 plt.savefig(save_mi_path, dpi=300)
                 print(f"[图表保存] Mutual Information 重要性图已保存至: {save_mi_path}")
-                plt.show()
+                # plt.show()
 
         return result

@@ -610,45 +610,6 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     print(f"        使用参数: {params}")
     print(f"==========================================")
 
-    # 0.训练前 EDA
-    eda_pre_dir = f"result/grouped_by_coating_weight/eda_pre/{group_tag}_{surface}"
-    eda = SurfaceEDAAnalyzer(default_save_dir=eda_pre_dir)
-
-    # 特征列表与 fit_and_evaluate_surface 保持一致（可选，不传则用 surface 默认）
-    prefix = 'Top' if surface == 'Top' else 'Bot'
-    feature_cols = [
-        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',
-        f'{prefix}_Current_Sum',
-        f'{prefix}_Current_Per_Speed',
-        f'{prefix}_Theoretical_Factor',
-        'Speed[m/min]_Process_Avg',
-        'Dimension_[mm]_Width',
-        'Dimension_[mm]_Thickness',
-        'Steel_Grade_Encoded'
-    ]
-
-    # 若 df 里还没有 Current_Per_Speed，可交给 analyzer 内部自动衍生，
-    # 或在这里先算好（推荐先算好，保证与训练特征完全一致）
-    speed_col = 'Speed[m/min]_Process_Avg'
-    current_col = f'{prefix}_Current_Sum'
-    if current_col in df.columns and speed_col in df.columns:
-        df = df.copy()
-        df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
-
-    eda_pre_result = eda.analyze(
-        df=df,
-        surface=surface,  # 自动推导 lab/actual
-        feature_cols=feature_cols,  # 与训练特征对齐
-        time_col="Produce Time",  # 确认你的时间列名
-        group_col=None,  # 组内已是单一规格，不再按 group 拆
-        plot_train_test=False,  # 训练前还没有切分
-        plot_model_residual=False,
-        save_dir=eda_pre_dir,
-        # compute_stats_only=False,         # 需要图就保持 False；调参循环可改 True
-    )
-    # eda_pre_result["summary_df"]  #可直接打印或写入报表
-    print(eda_pre_result["summary_df"])
-
 
     # 1. 相关性分析
     save_dir = f"result/grouped_by_coating_weight/correlation_result/correlation_result{safe_tag}"
@@ -715,10 +676,6 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     #     plot_train_test=False,
     #     plot_model_residual=False,
     # )
-
-
-
-
 
 
     print(f"\n-------- 【{tag_display}{surface_cn}表面 模型矫正前后残差诊断】 --------")

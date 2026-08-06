@@ -14,6 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from correlation_analyzer import SurfaceCorrelationAnalyzer
 from model_interpreter import ModelInterpreter   # ===== 模型解释性分析 =====
+from eda_analyzer import SurfaceEDAAnalyzer  # eda 数据分析， 模型训练前后
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -609,6 +610,46 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     print(f"        使用参数: {params}")
     print(f"==========================================")
 
+    # 0.训练前 EDA
+    eda_pre_dir = f"result/grouped_by_coating_weight/eda_pre/{group_tag}_{surface}"
+    eda = SurfaceEDAAnalyzer(default_save_dir=eda_pre_dir)
+
+    # 特征列表与 fit_and_evaluate_surface 保持一致（可选，不传则用 surface 默认）
+    prefix = 'Top' if surface == 'Top' else 'Bot'
+    feature_cols = [
+        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',
+        f'{prefix}_Current_Sum',
+        f'{prefix}_Current_Per_Speed',
+        f'{prefix}_Theoretical_Factor',
+        'Speed[m/min]_Process_Avg',
+        'Dimension_[mm]_Width',
+        'Dimension_[mm]_Thickness',
+        'Steel_Grade_Encoded'
+    ]
+
+    # 若 df 里还没有 Current_Per_Speed，可交给 analyzer 内部自动衍生，
+    # 或在这里先算好（推荐先算好，保证与训练特征完全一致）
+    speed_col = 'Speed[m/min]_Process_Avg'
+    current_col = f'{prefix}_Current_Sum'
+    if current_col in df.columns and speed_col in df.columns:
+        df = df.copy()
+        df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
+
+    eda_pre_result = eda.analyze(
+        df=df,
+        surface=surface,  # 自动推导 lab/actual
+        feature_cols=feature_cols,  # 与训练特征对齐
+        time_col="Produce Time",  # 确认你的时间列名
+        group_col=None,  # 组内已是单一规格，不再按 group 拆
+        plot_train_test=False,  # 训练前还没有切分
+        plot_model_residual=False,
+        save_dir=eda_pre_dir,
+        # compute_stats_only=False,         # 需要图就保持 False；调参循环可改 True
+    )
+    # eda_pre_result["summary_df"]  #可直接打印或写入报表
+    print(eda_pre_result["summary_df"])
+
+
     # 1. 相关性分析
     save_dir = f"result/grouped_by_coating_weight/correlation_result/correlation_result{safe_tag}"
     analyzer = SurfaceCorrelationAnalyzer(default_save_dir=save_dir)
@@ -639,10 +680,50 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     raw_residuals_train = aux['raw_residuals_train']
     model_residuals_train = aux['model_residuals_train']
 
-    mask_pos = (raw_residuals > 0)
-    mask_neg = (raw_residuals < 0)
+    # ========== 训练后 EDA（模型残差） ==========
+    eda_post_dir = f"result/grouped_by_coating_weight/eda_post/{group_tag}_{surface}"
+    eda_post = SurfaceEDAAnalyzer(default_save_dir=eda_post_dir)
+
+    # 方式 A：直接传 residual Series + 特征（推荐，最干净）
+    # 测试集模型残差
+    eda_post.analyze_residual_series(
+        residual=model_residuals,  # True - Model
+        features=X_test,  # 与训练特征一致
+        # time_series=df.loc[X_test.index, "Produce Time"] if "Produce Time" in df.columns else None,
+        train_idx=None,  # 如需 train/test 对比可再传
+        test_idx=None,
+        save_dir=os.path.join(eda_post_dir, "model_residual_test"),
+        title_prefix=f"{tag_display}{surface_cn}模型残差(测试)",
+    )
+
+    # 可选：原始在线残差也跑一遍，方便对比
+    eda_post.analyze_residual_series(
+        residual=raw_residuals,  # True - Online
+        features=X_test,
+        save_dir=os.path.join(eda_post_dir, "raw_residual_test"),
+        title_prefix=f"{tag_display}{surface_cn}原始在线残差(测试)",
+    )
+
+    # 方式 B：用 analyze + y_true/y_pred（等价）
+    # eda_post.analyze(
+    #     df=df.loc[X_test.index],
+    #     y_true=y_true_series,
+    #     y_pred=pred_series,
+    #     feature_cols=feature_cols,
+    #     surface=surface,
+    #     save_dir=eda_post_dir,
+    #     plot_train_test=False,
+    #     plot_model_residual=False,
+    # )
+
+
+
+
+
 
     print(f"\n-------- 【{tag_display}{surface_cn}表面 模型矫正前后残差诊断】 --------")
+    mask_pos = (raw_residuals > 0)
+    mask_neg = (raw_residuals < 0)
     if mask_pos.sum() > 0:
         mae_raw_pos = raw_residuals[mask_pos].abs().mean()
         mae_model_pos = model_residuals[mask_pos].abs().mean()
@@ -784,6 +865,24 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
 
     return corrector, metrics
 
+def get_feature_cols(surface: str) -> list:
+    prefix = "Top" if surface == "Top" else "Bot"
+    return [
+        f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg",
+        f"{prefix}_Current_Sum",
+        f"{prefix}_Current_Per_Speed",
+        f"{prefix}_Theoretical_Factor",
+        "Speed[m/min]_Process_Avg",
+        "Dimension_[mm]_Width",
+        "Dimension_[mm]_Thickness",
+        "Steel_Grade_Encoded",
+    ]
+
+
+
+
+
+
 
 # ==========================================
 # 6. 主流程：按镀层规格分组，逐组训练 Top/Bot 模型
@@ -814,6 +913,36 @@ if __name__ == "__main__":
     clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/cleaned_data/cleaned_data.xlsx"))
     clean_df = build_setpoint_group_key(clean_df)
     group_sizes = summarize_setpoint_groups(clean_df)
+
+    # 全量训练前 EDA
+    valid_labels = group_sizes[group_sizes >= MIN_GROUP_SAMPLES].index.tolist()
+
+    for surface in ["Top", "Bot"]:
+        # 确保衍生列存在（与训练时一致）
+        prefix = "Top" if surface == "Top" else "Bot"
+        speed_col = "Speed[m/min]_Process_Avg"
+        current_col = f"{prefix}_Current_Sum"
+        per_speed = f"{prefix}_Current_Per_Speed"
+        if current_col in clean_df.columns and speed_col in clean_df.columns:
+            if per_speed not in clean_df.columns:
+                clean_df = clean_df.copy()
+                clean_df[per_speed] = clean_df[current_col] / (clean_df[speed_col] + 1e-5)
+
+        eda_global = SurfaceEDAAnalyzer(
+            default_save_dir=f"result/grouped_by_coating_weight/eda_pre_global/{surface}"
+        )
+        eda_global.analyze(
+            df=clean_df,
+            surface=surface,
+            feature_cols=get_feature_cols(surface),  # ← 与训练完全一致
+            group_col="Setpoint_Group_Label",
+            target_groups=valid_labels,
+            time_col="Produce Time",
+            plot_train_test=False,
+            plot_model_residual=False,
+            max_groups=20,
+        )
+
 
     # 3. 过滤要运行的目标规格组
     target_groups = config.get("target_groups")

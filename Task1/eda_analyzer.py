@@ -124,7 +124,7 @@ class SurfaceEDAAnalyzer:
                 work[per_speed] = work[current_col] / (work[speed_col] + 1e-5)
 
         # ---------- 3. 确定残差列 ----------
-        residual_name = "_residual0_"
+        residual_name = "_residual_"
         if residual is not None:
             residual = residual.reindex(work.index)
             work[residual_name] = residual
@@ -139,7 +139,7 @@ class SurfaceEDAAnalyzer:
             y_pred = y_pred.reindex(work.index)
             work[residual_name] = y_true - y_pred
             residual_col = residual_name
-            print(f"[残差] 使用 y_true - y_pred 计算 residual")
+            print(f"[残差] 使用 y_true - y_pred 计算残差")
         else:
             if lab_col is None or actual_col is None:
                 raise ValueError(
@@ -151,7 +151,7 @@ class SurfaceEDAAnalyzer:
                 raise ValueError(f"lab_col={lab_col} 或 actual_col={actual_col} 不在 DataFrame 中")
             work[residual_name] = work[lab_col] - work[actual_col]
             residual_col = residual_name
-            print(f"[残差] 使用 {lab_col} - {actual_col} 计算 residual0")
+            print(f"[残差] 使用 {lab_col} - {actual_col} 计算残差")
 
         # 特征列表最终确认
         if feature_cols is None:
@@ -644,12 +644,13 @@ class SurfaceEDAAnalyzer:
             x=feature_col,
             y=residual_col,
             ax=ax,
-            scatter_kws={"alpha": 0.35, "s": 12},
-            line_kws={"color": "red", "lw": 2},
+            scatter_kws={"alpha": 0.35, "s": 12, "label": "样本点"},
+            line_kws={"color": "red", "lw": 2, "label": "LOWESS 拟合曲线"},
             lowess=True,
         )
-        ax.axhline(0, color="gray", ls="--", lw=1)
+        ax.axhline(0, color="gray", ls="--", lw=1, label="零线")
         ax.set_title(title)
+        ax.legend(loc="best", fontsize=9)
         plt.tight_layout()
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
         plt.close(fig)

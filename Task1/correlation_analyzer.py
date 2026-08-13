@@ -5,6 +5,57 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.feature_selection import mutual_info_regression
 
+# ====================== 中文字体设置（解决 Glyph missing 警告） ======================
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示为方块的问题
+
+def _setup_chinese_font():
+    """自动寻找系统中可用的中文字体并设置"""
+    from matplotlib import font_manager
+
+    # Windows 常见中文字体（按优先级）
+    candidates = [
+        'Microsoft YaHei',      # 微软雅黑
+        'SimHei',               # 黑体
+        'SimSun',               # 宋体
+        'KaiTi',                # 楷体
+        'FangSong',             # 仿宋
+        'Microsoft JhengHei',   # 微软正黑体
+        'PingFang SC',          # macOS
+        'Heiti SC',
+        'WenQuanYi Micro Hei',  # Linux
+        'Noto Sans CJK SC',
+        'Source Han Sans SC',
+        'Arial Unicode MS',
+    ]
+
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            plt.rcParams['font.sans-serif'] = [name] + plt.rcParams.get('font.sans-serif', [])
+            print(f"[字体] 已设置中文字体: {name}")
+            return name
+
+    # 都找不到时的兜底：尝试直接指定 Windows 字体文件路径
+    win_font_paths = [
+        r'C:\Windows\Fonts\msyh.ttc',      # 微软雅黑
+        r'C:\Windows\Fonts\msyh.ttf',
+        r'C:\Windows\Fonts\simhei.ttf',    # 黑体
+        r'C:\Windows\Fonts\simsun.ttc',    # 宋体
+    ]
+    for path in win_font_paths:
+        if os.path.exists(path):
+            font_manager.fontManager.addfont(path)
+            font_name = font_manager.FontProperties(fname=path).get_name()
+            plt.rcParams['font.sans-serif'] = [font_name] + plt.rcParams.get('font.sans-serif', [])
+            print(f"[字体] 通过路径加载中文字体: {font_name} ({path})")
+            return font_name
+
+    print("[字体] 警告: 未找到可用中文字体，图中中文可能显示为方块。建议安装微软雅黑或黑体。")
+    return None
+
+_setup_chinese_font()
+# ====================================================================================
+
 
 class SurfaceCorrelationAnalyzer:
     """模块化：钢板表面的相关性分析 + Spearman + Mutual Information"""
@@ -43,13 +94,25 @@ class SurfaceCorrelationAnalyzer:
 
         actual_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
         lab_col = f'{surface_cn}表面镀层重量A(XA1_0)'
+        residual_col=f'{prefix}_Residual'
+        # setpoint_col=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Min'
+        setpoint_col = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+
         speed_col = 'Speed[m/min]_Process_Avg'
         current_col = f'{prefix}_Current_Sum'
+
+
+
+        df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
+        df[f'{prefix}_Residual'] = df[lab_col] - df[actual_col]  # 计算残差
+        df[f'{prefix}_Deviation'] = df[setpoint_col] - df[actual_col] # 计算偏差
+
         df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
 
         cols_to_check = [
-            lab_col,
+            residual_col,
             actual_col,
+            f'{prefix}_Deviation',
             f'{prefix}_Current_Sum',
             f'{prefix}_Current_Per_Speed',
             f'{prefix}_Theoretical_Factor',
@@ -58,6 +121,7 @@ class SurfaceCorrelationAnalyzer:
             'Dimension_[mm]_Width',
             'Steel_Grade_Encoded'
         ]
+
 
         if extra_cols:
             for col in extra_cols:
@@ -80,16 +144,21 @@ class SurfaceCorrelationAnalyzer:
 
         for method in methods:
             corr_matrix = data.corr(method=method)
+
+            # ---------- 按与残差的相关性绝对值排序 ----------
+            residual_col = f'{prefix}_Residual'
+            if residual_col in corr_matrix.columns:
+                # 按与残差的 |corr| 降序
+                order = corr_matrix[residual_col].abs().sort_values(ascending=False).index.tolist()
+                corr_matrix = corr_matrix.loc[order, order]
+            # ---------------------------------------------
+
             result[f'corr_{method}'] = corr_matrix
 
-            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵】 ========")
-            if lab_col in corr_matrix.columns:
-                print(corr_matrix[lab_col].sort_values(ascending=False))
-            else:
-                print(corr_matrix)
+            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵（按残差|corr|排序）】 ========")
+            print(corr_matrix[residual_col].sort_values(ascending=False))
 
-            # 绘制热力图
-            plt.figure(figsize=(9, 7))
+            plt.figure(figsize=(10, 8))
             sns.heatmap(
                 corr_matrix,
                 annot=True,
@@ -99,22 +168,24 @@ class SurfaceCorrelationAnalyzer:
                 vmax=1,
                 square=True
             )
-            plt.title(f'{surface_cn}表面参数与实验室测定值 {method.upper()} 相关性热力图')
+            plt.title(f'{surface_cn}表面参数与残差 {method.upper()} 相关性热力图（按|corr|排序）')
             plt.tight_layout()
 
             save_img_path = os.path.join(out_dir, f"correlation_{surface}_{method}.png")
-            plt.savefig(save_img_path, dpi=300)
-            print(f"[图表保存] {surface_cn}表面 {method} 相关性热力图已保存至: {save_img_path}")
-            # plt.show()
+            plt.savefig(save_img_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[图表保存] {save_img_path}")
 
         # ====================== 2. Mutual Information ======================
-        if compute_mi and lab_col in data.columns:
-            feature_cols = [c for c in existing_cols if c != lab_col]
+        residual_col = f'{prefix}_Residual'
+
+        if compute_mi and residual_col in data.columns:
+            feature_cols = [c for c in existing_cols if c != residual_col]
             if not feature_cols:
                 print("没有可用于 Mutual Information 的特征列。")
             else:
                 X = data[feature_cols]
-                y = data[lab_col]
+                y = data[residual_col]  # 目标改为残差
 
                 mi_scores = mutual_info_regression(
                     X, y,
@@ -123,19 +194,40 @@ class SurfaceCorrelationAnalyzer:
                 mi_series = pd.Series(mi_scores, index=feature_cols).sort_values(ascending=False)
                 result['mi'] = mi_series
 
-                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：{lab_col}）】 ========")
+                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：残差）】 ========")
                 print(mi_series)
 
-                # 绘制 MI 条形图
                 plt.figure(figsize=(8, max(4, len(mi_series) * 0.4)))
                 mi_series.sort_values().plot(kind='barh', color='steelblue')
                 plt.xlabel('Mutual Information')
-                plt.title(f'{surface_cn}表面特征对实验室镀层重量的 Mutual Information')
+                plt.title(f'{surface_cn}表面特征对残差的 Mutual Information')
                 plt.tight_layout()
 
                 save_mi_path = os.path.join(out_dir, f"mi_importance_{surface}.png")
-                plt.savefig(save_mi_path, dpi=300)
+                plt.savefig(save_mi_path, dpi=300, bbox_inches='tight')
+                plt.close()
                 print(f"[图表保存] Mutual Information 重要性图已保存至: {save_mi_path}")
-                # plt.show()
 
         return result
+
+if __name__ == "__main__":
+    # 读取清洗后的数据
+    cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+    analyzer = SurfaceCorrelationAnalyzer(default_save_dir="result/correlation_result")
+
+    # 分表面整体分析
+    for surface in ['Top', 'Bot']:
+        print("\n" + "=" * 60)
+        print(f"开始分析 {surface} 表面")
+        print("=" * 60)
+        analyzer.analyze_surface(
+            cleaned_df,
+            surface=surface,
+            extra_cols=None,
+            save_dir="result/correlation_result",
+            corr_method='both',      # 同时出 pearson + spearman
+            compute_mi=True,
+            mi_random_state=42
+        )
+
+    print("\n全部完成。结果保存在: result/correlation_result/")

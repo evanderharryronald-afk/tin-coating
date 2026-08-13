@@ -76,18 +76,18 @@ def load_pipeline_config(config_path="config.json"):
     default_config.update(user_config)
     return default_config
 
-def get_params_for(group_params, group_label, surface):
-    """取某个 (组, 表面) 的参数，缺失字段回退到默认值"""
-    key = f"{group_label}__{surface}"
-    override = group_params.get(key, {})
-    merged = {**DEFAULT_PARAMS, **override}
-    return merged
-
-
 def get_params_for_group(config, group_label, surface):
     """
     根据组名和表面获取最终模型参数
     优先级：group_params_override[组名__表面] > default_params
+    
+    Args:
+        config: 配置字典，包含 default_params 和 group_params_override
+        group_label: 规格组标签（如 'Top2.799_Bot2.799'）
+        surface: 表面类型 ('Top' 或 'Bot')
+    
+    Returns:
+        dict: 合并后的参数字典
     """
     # 1. 基础默认参数
     base_params = config.get("default_params", {}).copy()
@@ -176,6 +176,30 @@ def check_residual_distribution(df, group_tag=""):
 # ==========================================
 # 3. 残差建模核心类
 # ==========================================
+
+def _build_corrector_instance(params, ModelClass):
+    """
+    根据参数创建矫正模型实例
+    
+    Args:
+        params: 参数字典，包含 alpha_smoothing, pos_boost, damping, max_iter, learning_rate, max_depth
+        ModelClass: 模型类 (ResidualCorrectionModel 或 LinearResidualCorrectionModel)
+    
+    Returns:
+        实例化的矫正模型对象
+    """
+    corrector = ModelClass(
+        alpha_smoothing=params["alpha_smoothing"],
+        pos_boost=params["pos_boost"],
+        damping=params["damping"],
+        # 如果用树模型会读取 max_iter/learning_rate，如果用线性模型额外参数会被 **kwargs 吸收，完全兼容
+        max_iter=params.get("max_iter", 200),
+        learning_rate=params.get("learning_rate", 0.05),
+        max_depth=params.get("max_depth", 4),
+    )
+    return corrector
+
+
 def compute_direction_sample_weight(y_delta, pos_boost=1.0, damping=0.0):
     """
     damping: 0~1，默认0（不加权，即完全等权重，对应网格搜索中RMSE最优的配置）。
@@ -286,6 +310,66 @@ class LinearResidualCorrectionModel:
         return final_pred, predicted_delta_smooth
 
 
+def _compute_directional_metrics(residuals):
+    """
+    计算残差的正/负偏差相关指标
+    
+    Args:
+        residuals: pandas Series，残差数组
+    
+    Returns:
+        dict: 包含 mask_pos, mask_neg, pos_count, neg_count, pos_mae, neg_mae 的字典
+    """
+    mask_pos = (residuals > 0)
+    mask_neg = (residuals < 0)
+    
+    pos_count = mask_pos.sum()
+    neg_count = mask_neg.sum()
+    
+    pos_mae = residuals[mask_pos].abs().mean() if pos_count > 0 else 0.0
+    neg_mae = residuals[mask_neg].abs().mean() if neg_count > 0 else 0.0
+    
+    return {
+        'mask_pos': mask_pos,
+        'mask_neg': mask_neg,
+        'pos_count': pos_count,
+        'neg_count': neg_count,
+        'pos_mae': pos_mae,
+        'neg_mae': neg_mae,
+    }
+
+
+def _plot_residual_distribution(ax, residuals_train, residuals_test, 
+                                 color_train, color_test, 
+                                 label_train, label_test, title, xlabel):
+    """
+    绘制残差分布直方图（训练集 vs 测试集对比）
+    
+    Args:
+        ax: matplotlib 子图对象
+        residuals_train: 训练集残差 Series
+        residuals_test: 测试集残差 Series
+        color_train: 训练集颜色
+        color_test: 测试集颜色
+        label_train: 训练集标签
+        label_test: 测试集标签
+        title: 子图标题
+        xlabel: x轴标签
+    """
+    sns.histplot(residuals_train, ax=ax, color=color_train, label=label_train,
+                 kde=True, stat="density", alpha=0.4)
+    sns.histplot(residuals_test, ax=ax, color=color_test, label=label_test,
+                 kde=True, stat="density", alpha=0.4)
+    ax.axvline(0, color='black', linestyle='--', linewidth=1)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('概率密度')
+    ax.legend()
+    ax.grid(True, linestyle=':', alpha=0.6)
+
+
+
+
 
 
 
@@ -315,12 +399,17 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     df = df.copy()
     speed_col = 'Speed[m/min]_Process_Avg'
     current_col = f'{prefix}_Current_Sum'
-    df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
-
     online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+    # setpoint_weight=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Min'
+    setpoint_weight=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+
+    df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
+    df[f'{prefix}_Weight_Deviation'] = df[setpoint_weight]-df[online_col]
+
     feature_cols = [
         online_col,
         current_col,
+        f'{prefix}_Weight_Deviation',
         f'{prefix}_Current_Per_Speed',
         f'{prefix}_Theoretical_Factor',
         speed_col,
@@ -350,15 +439,8 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     if not use_expanding_window:
         X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
             train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
-        corrector = ModelClass(
-            alpha_smoothing=params["alpha_smoothing"],
-            pos_boost=params["pos_boost"],
-            damping=params["damping"],
-            # 如果用树模型会读取 max_iter/learning_rate，如果用线性模型额外参数会被 **kwargs 吸收，完全兼容
-            max_iter=params.get("max_iter", 200),
-            learning_rate=params.get("learning_rate", 0.05),
-            max_depth=params.get("max_depth", 4),
-        )
+        
+        corrector = _build_corrector_instance(params, ModelClass)
         corrector.fit(X_train, y_delta_train)
 
         # corrector = ResidualCorrectionModel(
@@ -423,14 +505,7 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
             actual_test = online_actual.iloc[test_idx]
             y_true_test = y_true_full.iloc[test_idx]
 
-            corrector = ModelClass(
-                alpha_smoothing=params["alpha_smoothing"],
-                pos_boost=params["pos_boost"],
-                damping=params["damping"],
-                max_iter=params.get("max_iter", 200),
-                learning_rate=params.get("learning_rate", 0.05),
-                max_depth=params.get("max_depth", 4),
-            )
+            corrector = _build_corrector_instance(params, ModelClass)
             corrector.fit(X_train, y_delta_train)
 
             # corrector = ResidualCorrectionModel(
@@ -508,13 +583,16 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     overall_mae_model = model_residuals.abs().mean()
     overall_mae_online = raw_residuals.abs().mean()
 
-    mask_pos = (raw_residuals > 0)
-    mask_neg = (raw_residuals < 0)
-
-    pos_mae_model = model_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_model
-    neg_mae_model = model_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_model
-    pos_mae_online = raw_residuals[mask_pos].abs().mean() if mask_pos.sum() > 0 else overall_mae_online
-    neg_mae_online = raw_residuals[mask_neg].abs().mean() if mask_neg.sum() > 0 else overall_mae_online
+    # 使用辅助函数计算正/负偏差指标
+    test_directional_metrics = _compute_directional_metrics(raw_residuals)
+    test_directional_metrics_model = _compute_directional_metrics(model_residuals)
+    
+    mask_pos = test_directional_metrics['mask_pos']
+    mask_neg = test_directional_metrics['mask_neg']
+    pos_mae_online = test_directional_metrics['pos_mae']
+    neg_mae_online = test_directional_metrics['neg_mae']
+    pos_mae_model = test_directional_metrics_model['pos_mae']
+    neg_mae_model = test_directional_metrics_model['neg_mae']
 
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
@@ -591,6 +669,8 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         model_residuals=model_residuals,
         raw_residuals_train=raw_residuals_train,
         model_residuals_train=model_residuals_train,
+        test_directional_metrics_raw=test_directional_metrics,
+        test_directional_metrics_model=test_directional_metrics_model,
     )
     return corrector, metrics, aux
 
@@ -640,6 +720,8 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     # 新增
     raw_residuals_train = aux['raw_residuals_train']
     model_residuals_train = aux['model_residuals_train']
+    test_directional_metrics = aux['test_directional_metrics_raw']
+    test_directional_metrics_model = aux['test_directional_metrics_model']
 
     # ========== 训练后 EDA（模型残差） ==========
     eda_post_dir = f"result/grouped_by_coating_weight/eda_post/{group_tag}_{surface}"
@@ -679,18 +761,17 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
 
 
     print(f"\n-------- 【{tag_display}{surface_cn}表面 模型矫正前后残差诊断】 --------")
-    mask_pos = (raw_residuals > 0)
-    mask_neg = (raw_residuals < 0)
-    if mask_pos.sum() > 0:
-        mae_raw_pos = raw_residuals[mask_pos].abs().mean()
-        mae_model_pos = model_residuals[mask_pos].abs().mean()
+    # 使用已计算的 mask_pos 和 mask_neg
+    if test_directional_metrics['pos_count'] > 0:
+        mae_raw_pos = test_directional_metrics['pos_mae']
+        mae_model_pos = test_directional_metrics_model['pos_mae']
         print(
-            f"当原始在线偏低 (残差 > 0, 样本数 {mask_pos.sum()}): 原始 MAE = {mae_raw_pos:.4f}  -->  模型矫正后 MAE = {mae_model_pos:.4f}")
-    if mask_neg.sum() > 0:
-        mae_raw_neg = raw_residuals[mask_neg].abs().mean()
-        mae_model_neg = model_residuals[mask_neg].abs().mean()
+            f"当原始在线偏低 (残差 > 0, 样本数 {test_directional_metrics['pos_count']}): 原始 MAE = {mae_raw_pos:.4f}  -->  模型矫正后 MAE = {mae_model_pos:.4f}")
+    if test_directional_metrics['neg_count'] > 0:
+        mae_raw_neg = test_directional_metrics['neg_mae']
+        mae_model_neg = test_directional_metrics_model['neg_mae']
         print(
-            f"当原始在线偏高 (残差 < 0, 样本数 {mask_neg.sum()}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
+            f"当原始在线偏高 (残差 < 0, 样本数 {test_directional_metrics['neg_count']}): 原始 MAE = {mae_raw_neg:.4f}  -->  模型矫正后 MAE = {mae_model_neg:.4f}")
     print("------------------------------------------------------\n")
 
     print(f"======== 【{tag_display}{surface_cn}表面 拟合性能评估】 ========")
@@ -756,28 +837,22 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # 左图：原始在线残差（True - Online）
-    sns.histplot(raw_residuals_train, ax=axes[0], color='orange', label='训练集 原始残差',
-                 kde=True, stat="density", alpha=0.4)
-    sns.histplot(raw_residuals, ax=axes[0], color='red', label='测试集 原始残差',
-                 kde=True, stat="density", alpha=0.4)
-    axes[0].axvline(0, color='black', linestyle='--', linewidth=1)
-    axes[0].set_title(f'{tag_display}{surface_cn}表面 原始在线残差分布\n(训练集 vs 测试集)')
-    axes[0].set_xlabel('残差 (True - Online) g/m2')
-    axes[0].set_ylabel('概率密度')
-    axes[0].legend()
-    axes[0].grid(True, linestyle=':', alpha=0.6)
+    _plot_residual_distribution(
+        axes[0], raw_residuals_train, raw_residuals,
+        'orange', 'red',
+        '训练集 原始残差', '测试集 原始残差',
+        f'{tag_display}{surface_cn}表面 原始在线残差分布\n(训练集 vs 测试集)',
+        '残差 (True - Online) g/m2'
+    )
 
     # 右图：模型校正后残差（True - Model）
-    sns.histplot(model_residuals_train, ax=axes[1], color='cyan', label='训练集 模型残差',
-                 kde=True, stat="density", alpha=0.4)
-    sns.histplot(model_residuals, ax=axes[1], color='green', label='测试集 模型残差',
-                 kde=True, stat="density", alpha=0.4)
-    axes[1].axvline(0, color='black', linestyle='--', linewidth=1)
-    axes[1].set_title(f'{tag_display}{surface_cn}表面 模型校正后残差分布\n(训练集 vs 测试集)')
-    axes[1].set_xlabel('残差 (True - Model) g/m2')
-    axes[1].set_ylabel('概率密度')
-    axes[1].legend()
-    axes[1].grid(True, linestyle=':', alpha=0.6)
+    _plot_residual_distribution(
+        axes[1], model_residuals_train, model_residuals,
+        'cyan', 'green',
+        '训练集 模型残差', '测试集 模型残差',
+        f'{tag_display}{surface_cn}表面 模型校正后残差分布\n(训练集 vs 测试集)',
+        '残差 (True - Model) g/m2'
+    )
 
     plt.tight_layout()
     dist_img_path = (f"result/grouped_by_coating_weight/fitting_result/"
@@ -788,18 +863,8 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     plt.close()
 
     # ===== 模型解释性分析 =====
-    # 特征列需要与 fit_and_evaluate_surface 里保持一致
-    prefix = 'Top' if surface == 'Top' else 'Bot'
-    feature_cols = [
-        f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',
-        f'{prefix}_Current_Sum',
-        f'{prefix}_Current_Per_Speed',
-        f'{prefix}_Theoretical_Factor',
-        'Speed[m/min]_Process_Avg',
-        'Dimension_[mm]_Width',
-        'Dimension_[mm]_Thickness',
-        'Steel_Grade_Encoded'
-    ]
+    # 特征列使用统一的 get_feature_cols 函数，保持与 fit_and_evaluate_surface 一致
+    feature_cols = get_feature_cols(surface)
 
     interp_dir = f"result/grouped_by_coating_weight/interpretation/{group_tag}_{surface}"
     interpreter = ModelInterpreter(
@@ -826,6 +891,7 @@ def get_feature_cols(surface: str) -> list:
     prefix = "Top" if surface == "Top" else "Bot"
     return [
         f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg",
+        f'{prefix}_Weight_Deviation',
         f"{prefix}_Current_Sum",
         f"{prefix}_Current_Per_Speed",
         f"{prefix}_Theoretical_Factor",
@@ -834,9 +900,6 @@ def get_feature_cols(surface: str) -> list:
         "Dimension_[mm]_Thickness",
         "Steel_Grade_Encoded",
     ]
-
-
-
 
 
 
@@ -880,10 +943,21 @@ if __name__ == "__main__":
         speed_col = "Speed[m/min]_Process_Avg"
         current_col = f"{prefix}_Current_Sum"
         per_speed = f"{prefix}_Current_Per_Speed"
+        weight_deviation = f"{prefix}_Weight_Deviation"
+        online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+        setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+        
+        clean_df = clean_df.copy()
+        
+        # 衍生 Current_Per_Speed
         if current_col in clean_df.columns and speed_col in clean_df.columns:
             if per_speed not in clean_df.columns:
-                clean_df = clean_df.copy()
                 clean_df[per_speed] = clean_df[current_col] / (clean_df[speed_col] + 1e-5)
+        
+        # 衍生 Weight_Deviation
+        if online_col in clean_df.columns and setpoint_weight in clean_df.columns:
+            if weight_deviation not in clean_df.columns:
+                clean_df[weight_deviation] = clean_df[setpoint_weight] - clean_df[online_col]
 
         eda_global = SurfaceEDAAnalyzer(
             default_save_dir=f"result/grouped_by_coating_weight/eda_pre_global/{surface}"
@@ -921,6 +995,24 @@ if __name__ == "__main__":
             continue
 
         group_df = clean_df[clean_df['Setpoint_Group_Label'] == group_label].copy()
+        
+        # 确保衍生特征存在（与 fit_and_evaluate_surface 中的衍生一致）
+        for surface in ['Top', 'Bot']:
+            prefix = "Top" if surface == "Top" else "Bot"
+            speed_col = "Speed[m/min]_Process_Avg"
+            current_col = f"{prefix}_Current_Sum"
+            per_speed = f"{prefix}_Current_Per_Speed"
+            weight_deviation = f"{prefix}_Weight_Deviation"
+            online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+            setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+            
+            if current_col in group_df.columns and speed_col in group_df.columns:
+                if per_speed not in group_df.columns:
+                    group_df[per_speed] = group_df[current_col] / (group_df[speed_col] + 1e-5)
+            
+            if online_col in group_df.columns and setpoint_weight in group_df.columns:
+                if weight_deviation not in group_df.columns:
+                    group_df[weight_deviation] = group_df[setpoint_weight] - group_df[online_col]
 
         # 分别获取 Top / Bot 的参数（自动处理了默认值 + 覆盖值）
         top_params = get_params_for_group(config, group_label, 'Top')

@@ -55,11 +55,14 @@ class ResidualCorrectionModel:
 
     def __init__(self, monotonic_feature_idx=None, alpha_smoothing=0.7,
                  pos_boost=1.0, damping=0.0, learning_rate=0.05,
-                 max_iter=200, max_depth=4, **kwargs):
+                 max_iter=200, max_depth=4,loss='absolute_error', quantile=None, **kwargs):
         self.alpha_smoothing = alpha_smoothing
         self.pos_boost = pos_boost
         self.damping = damping
         self.monotonic_feature_idx = monotonic_feature_idx
+
+        self.loss = loss
+        self.quantile = quantile
 
         # 增加树模型参数控制
         self.learning_rate = learning_rate
@@ -74,15 +77,19 @@ class ResidualCorrectionModel:
             monotonic_cst = [0] * n_features
             monotonic_cst[self.monotonic_feature_idx] = -1
 
-        self.model = HistGradientBoostingRegressor(
-            max_iter=self.max_iter,
-            learning_rate=self.learning_rate,
-            max_depth=self.max_depth,
-            loss='absolute_error',
-            monotonic_cst=monotonic_cst,
-            random_state=42,
+        model_kwargs = {
+            'max_iter': self.max_iter,
+            'learning_rate': self.learning_rate,
+            'max_depth': self.max_depth,
+            'loss': self.loss,
+            'monotonic_cst': monotonic_cst,
+            'random_state': 42,
             **self.kwargs
-        )
+        }
+        if self.loss == 'quantile' and self.quantile is not None:
+            model_kwargs['quantile'] = self.quantile
+
+        self.model = HistGradientBoostingRegressor(**model_kwargs)
 
     def fit(self, X, y_delta):
         self._build_model(n_features=X.shape[1])
@@ -120,7 +127,9 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         'pos_boost': 1.0,
         'learning_rate': 0.05,
         'max_iter': 200,
-        'max_depth': 4
+        'max_depth': 4,
+        'loss': 'absolute_error',  # 新增
+        # 'quantile': 0.5,         # 只有 loss='quantile' 时才需要
     }
     if params is not None:
         default_config.update(params)
@@ -131,10 +140,10 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     print(f"        配置参数: {default_config}")
     print(f"==========================================")
 
-    # 1. 相关性分析（直接调用模块）
-    # 实例化相关性分析器模块
-    corr_analyzer = SurfaceCorrelationAnalyzer()
-    corr_analyzer.analyze_surface(df, surface=surface,save_dir="result/correlation_result")
+    # # 1. 相关性分析（直接调用模块）
+    # # 实例化相关性分析器模块
+    # corr_analyzer = SurfaceCorrelationAnalyzer()
+    # corr_analyzer.analyze_surface(df, surface=surface,save_dir="result/correlation_result")
 
     # 2. 特征工程
     speed_col = 'Speed[m/min]_Process_Avg'
@@ -212,7 +221,9 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
 
     result_detail = result_detail.sort_values('模型残差绝对值', ascending=False)
 
-    detail_save_path = f"result/fitting_result/residual_detail_{surface}.xlsx"
+    # detail_save_path = f"result/fitting_result/mae_lose/residual_detail_{surface}.xlsx"
+    # detail_save_path = f"result/fitting_result/mse_lose/residual_detail_{surface}.xlsx"
+    detail_save_path = f"result/fitting_result/quantile_lose/residual_detail_{surface}.xlsx"
     result_detail.to_excel(detail_save_path, index=True, index_label='原始数据行号')
     print(f"[导出提示] {surface_cn}表面逐行残差明细已保存至: {detail_save_path}")
 
@@ -266,10 +277,13 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.tight_layout()
 
-    fit_img_path = f"result/fitting_result/fitting_result_{surface}.png"
+    # fit_img_path = f"result/fitting_result/mae_lose/fitting_result_{surface}.png"
+    # fit_img_path = f"result/fitting_result/mse_lose/fitting_result_{surface}_.png"
+    fit_img_path = f"result/fitting_result/quantile_lose/fitting_result_{surface}_.png"
+
     plt.savefig(fit_img_path, dpi=300)
     print(f"[图表保存] {surface_cn}表面拟合对照图已保存至: {fit_img_path}")
-    plt.show()
+    # plt.show()
 
     # 6. 残差对比图
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
@@ -294,10 +308,12 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     ax2.grid(True, linestyle=':', alpha=0.6)
 
     plt.tight_layout()
-    res_img_path = f"result/fitting_result/residual_analysis_{surface}.png"
+    # res_img_path = f"result/fitting_result/mae_lose/residual_analysis_{surface}.png"
+    # res_img_path = f"result/fitting_result/mse_lose/residual_analysis_{surface}.png"
+    res_img_path = f"result/fitting_result/quantile_lose/residual_analysis_{surface}.png"
     plt.savefig(res_img_path, dpi=300)
     print(f"[图表保存] {surface_cn}表面残差分析图已保存至: {res_img_path}")
-    plt.show()
+    # plt.show()
 
     return corrector
 
@@ -332,7 +348,11 @@ if __name__ == "__main__":
         "alpha_smoothing": 0.93,
         "learning_rate": 0.072,  # Optuna优化后的学习率
         "max_iter": 350,  # Optuna优化后的树数量
-        "max_depth": 8  # Optuna优化后的树最大深度
+        "max_depth": 8,  # Optuna优化后的树最大深度
+        # "loss": "absolute_error",
+        # "loss": "squared_error",
+        "loss": "quantile",
+        "quantile": 0.9,
     }
 
     bot_params = {
@@ -341,8 +361,13 @@ if __name__ == "__main__":
         "alpha_smoothing": 0.83,
         "learning_rate": 0.04,  # Optuna优化后的学习率
         "max_iter": 200,  # Optuna优化后的树数量
-        "max_depth": 8  # Optuna优化后的树最大深度
+        "max_depth": 8,  # Optuna优化后的树最大深度
+        # "loss": "absolute_error",
+        # "loss": "squared_error",
+        "loss": "quantile",
+        "quantile": 0.5,
     }
+
     run_surface_pipeline(clean_df, surface='Top', params=top_params)
     run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
 

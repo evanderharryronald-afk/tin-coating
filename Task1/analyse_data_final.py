@@ -8,6 +8,9 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
 from correlation_analyzer import SurfaceCorrelationAnalyzer
+from sklearn.linear_model import Ridge, HuberRegressor
+from sklearn.metrics import mean_absolute_error
+
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
@@ -177,6 +180,24 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
         train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
 
+    # ---------- Naive baseline ----------
+    mean_delta = y_delta_train.mean()
+    median_delta = y_delta_train.median()
+
+    pred_naive_mean = actual_test + mean_delta
+    pred_naive_median = actual_test + median_delta
+
+    # ---------- Linear baselines ----------
+    ridge = Ridge(alpha=1.0)
+    ridge.fit(X_train, y_delta_train)
+    pred_ridge = actual_test + ridge.predict(X_test)
+
+    huber = HuberRegressor(epsilon=1.35, alpha=0.0001, max_iter=500)
+    huber.fit(X_train, y_delta_train)
+    pred_huber = actual_test + huber.predict(X_test)
+
+
+
     # 4. 残差建模 + 单调约束 + EWMA平滑
     # 将 default_config 解包传入 ResidualCorrectionModel
     corrector = ResidualCorrectionModel(
@@ -264,6 +285,80 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
 
     start_idx = X_test.index[0]
     end_idx = X_test.index[-1]
+
+    print(f"\n======== 【{surface_cn}表面 Baseline + 模型 对比（测试集）】 ========")
+
+    # Online
+    r2 = r2_score(y_true_test, actual_test)
+    rmse = np.sqrt(mean_squared_error(y_true_test, actual_test))
+    mae = mean_absolute_error(y_true_test, actual_test)
+    print(f"{'Online (无校正)':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # Naive Mean
+    r2 = r2_score(y_true_test, pred_naive_mean)
+    rmse = np.sqrt(mean_squared_error(y_true_test, pred_naive_mean))
+    mae = mean_absolute_error(y_true_test, pred_naive_mean)
+    print(f"{'Naive Mean Δ':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # Naive Median
+    r2 = r2_score(y_true_test, pred_naive_median)
+    rmse = np.sqrt(mean_squared_error(y_true_test, pred_naive_median))
+    mae = mean_absolute_error(y_true_test, pred_naive_median)
+    print(f"{'Naive Median Δ':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # Ridge
+    r2 = r2_score(y_true_test, pred_ridge)
+    rmse = np.sqrt(mean_squared_error(y_true_test, pred_ridge))
+    mae = mean_absolute_error(y_true_test, pred_ridge)
+    print(f"{'Ridge':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # Huber
+    r2 = r2_score(y_true_test, pred_huber)
+    rmse = np.sqrt(mean_squared_error(y_true_test, pred_huber))
+    mae = mean_absolute_error(y_true_test, pred_huber)
+    print(f"{'Huber':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # GBDT
+    r2 = r2_score(y_true_test, pred_series)
+    rmse = np.sqrt(mean_squared_error(y_true_test, pred_series))
+    mae = mean_absolute_error(y_true_test, pred_series)
+    print(f"{'GBDT (当前模型)':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+    # ---------- 双向 MAE 对比（表格形式） ----------
+    raw_residuals = y_true_test - actual_test
+    mask_pos = raw_residuals > 0
+    mask_neg = raw_residuals < 0
+
+    models = {
+        "Online": actual_test,
+        "Naive Mean": pred_naive_mean,
+        "Naive Median": pred_naive_median,
+        "Ridge": pred_ridge,
+        "Huber": pred_huber,
+        "GBDT": pred_series,
+    }
+
+    # 表头
+    header = f"{'方向':<12}" + "".join(f"{name:>14}" for name in models.keys())
+    print(f"\n======== 【{surface_cn}表面 双向 MAE 对比】 ========")
+    print(header)
+    print("-" * len(header))
+
+    # 在线偏低
+    row_pos = f"{'在线偏低时':<12}"
+    for pred in models.values():
+        mae = (y_true_test[mask_pos] - pred[mask_pos]).abs().mean() if mask_pos.sum() > 0 else float('nan')
+        row_pos += f"{mae:>14.4f}"
+    print(row_pos)
+
+    # 在线偏高
+    row_neg = f"{'在线偏高时':<12}"
+    for pred in models.values():
+        mae = (y_true_test[mask_neg] - pred[mask_neg]).abs().mean() if mask_neg.sum() > 0 else float('nan')
+        row_neg += f"{mae:>14.4f}"
+    print(row_neg)
+
+    print("-" * len(header))
 
     # 5. 拟合对比图
     plt.figure(figsize=(12, 5))
@@ -365,7 +460,7 @@ if __name__ == "__main__":
         # "loss": "absolute_error",
         # "loss": "squared_error",
         "loss": "quantile",
-        "quantile": 0.5,
+        "quantile": 0.3,
     }
 
     run_surface_pipeline(clean_df, surface='Top', params=top_params)

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import dcor
 from sklearn.feature_selection import mutual_info_regression
 
 # ====================== 中文字体设置（解决 Glyph missing 警告） ======================
@@ -71,6 +72,9 @@ class SurfaceCorrelationAnalyzer:
         save_dir=None,
         corr_method='pearson',      # 'pearson' | 'spearman' | 'both'
         compute_mi=True,            # 是否计算 Mutual Information
+        compute_dcor=True,          # 是否计算距离相关性
+        compute_mi_matrix=False,    # 是否计算互信息热力矩阵
+        compute_dcor_matrix=False,  # 是否计算距离相关性热力矩阵
         mi_random_state=42
     ):
         """
@@ -208,6 +212,111 @@ class SurfaceCorrelationAnalyzer:
                 plt.close()
                 print(f"[图表保存] Mutual Information 重要性图已保存至: {save_mi_path}")
 
+        # ====================== 全变量 Mutual Information 矩阵 ======================
+        if compute_mi_matrix and residual_col in data.columns:
+            cols = existing_cols
+            n = len(cols)
+            mi_matrix = pd.DataFrame(np.zeros((n, n)), index=cols, columns=cols)
+
+            for i, col_i in enumerate(cols):
+                # 对每一列，计算它与其他所有列的 MI
+                X = data[cols].drop(columns=[col_i])
+                y = data[col_i]
+                mi_scores = mutual_info_regression(X, y, random_state=mi_random_state)
+                mi_matrix.loc[col_i, X.columns] = mi_scores
+
+            # 对称化（取平均）
+            mi_matrix = (mi_matrix + mi_matrix.T) / 2
+            # 对角线设为 0
+            for col in mi_matrix.columns:
+                mi_matrix.loc[col, col] = 0.0
+
+            # ---------- 按与残差的 MI 值排序（残差固定第一位） ----------
+            if residual_col in mi_matrix.columns:
+                # 先取出与残差的 MI，排除自己
+                mi_with_residual = mi_matrix[residual_col].drop(residual_col)
+                # 按绝对值从大到小排序
+                other_order = mi_with_residual.abs().sort_values(ascending=False).index.tolist()
+                # 残差放第一位，后面跟排序后的其他变量
+                order = [residual_col] + other_order
+                mi_matrix = mi_matrix.loc[order, order]
+
+            result['mi_matrix'] = mi_matrix
+
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(mi_matrix, annot=True, cmap='YlGnBu', fmt=".2f", square=True)
+            plt.title(f'{surface_cn}表面 全变量 Mutual Information 矩阵')
+            plt.tight_layout()
+            save_path = os.path.join(out_dir, f"mi_matrix_{surface}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[图表保存] {save_path}")
+
+        # ====================== 3. 距离相关性 (Distance Correlation) ======================
+        if compute_dcor and residual_col in data.columns:
+            feature_cols = [c for c in existing_cols if c != residual_col]
+            dcor_scores = {}
+            y = data[residual_col].values.astype(float)
+
+            for col in feature_cols:
+                x = data[col].values.astype(float)
+                # 处理可能的常数列（dcor 对常数会返回 nan）
+                if np.std(x) < 1e-10:
+                    dcor_scores[col] = 0.0
+                else:
+                    dcor_scores[col] = dcor.distance_correlation(x, y)
+
+            dcor_series = pd.Series(dcor_scores).sort_values(ascending=False)
+            result['dcor'] = dcor_series
+
+            print(f"\n======== 【{surface_cn}表面 距离相关性（目标：残差）】 ========")
+            print(dcor_series)
+
+            plt.figure(figsize=(8, max(4, len(dcor_series) * 0.4)))
+            dcor_series.sort_values().plot(kind='barh', color='darkorange')
+            plt.xlabel('Distance Correlation')
+            plt.title(f'{surface_cn}表面特征对残差的距离相关性')
+            plt.tight_layout()
+
+            save_dcor_path = os.path.join(out_dir, f"dcor_importance_{surface}.png")
+            plt.savefig(save_dcor_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[图表保存] {save_dcor_path}")
+
+        # ====================== 全变量距离相关性矩阵 ======================
+        if compute_dcor_matrix and residual_col in data.columns:
+            cols = existing_cols
+            n = len(cols)
+            dcor_matrix = pd.DataFrame(np.zeros((n, n)), index=cols, columns=cols)
+
+            for i, col_i in enumerate(cols):
+                for j, col_j in enumerate(cols):
+                    if i <= j:  # 只算上三角，对称填充
+                        if i == j:
+                            dcor_matrix.iloc[i, j] = 1.0
+                        else:
+                            val = dcor.distance_correlation(
+                                data[col_i].values.astype(float),
+                                data[col_j].values.astype(float)
+                            )
+                            dcor_matrix.iloc[i, j] = val
+                            dcor_matrix.iloc[j, i] = val
+
+            #  dcor_matrix 按照对残差的距离相关性绝对值排序
+            if residual_col in dcor_matrix.columns:
+                order = dcor_matrix[residual_col].abs().sort_values(ascending=False).index.tolist()
+                dcor_matrix = dcor_matrix.loc[order, order]
+
+            result['dcor_matrix'] = dcor_matrix
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(dcor_matrix, annot=True, cmap='YlOrRd', fmt=".2f", vmin=0, vmax=1, square=True)
+            plt.title(f'{surface_cn}表面 全变量距离相关性矩阵')
+            plt.tight_layout()
+            save_path = os.path.join(out_dir, f"dcor_matrix_{surface}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[图表保存] {save_path}")
+
         return result
 
 if __name__ == "__main__":
@@ -226,7 +335,10 @@ if __name__ == "__main__":
             extra_cols=None,
             save_dir="result/correlation_result",
             corr_method='both',      # 同时出 pearson + spearman
-            compute_mi=True,
+            compute_mi=True,         # 计算 Mutual Information
+            compute_dcor=True,       # 计算距离相关性
+            compute_mi_matrix=True,   # 计算全变量 MI 矩阵
+            compute_dcor_matrix=True,  # 计算全变量距离相关性矩阵
             mi_random_state=42
         )
 

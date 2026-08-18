@@ -44,6 +44,14 @@ class SteelDataCleaner:
         df['Top_Delta'] = df['上表面镀层重量A(XA1_0)'] - df['Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg']
         df['Bot_Delta'] = df['下表面镀层重量A(XA1_0)'] - df['Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg']
 
+        # 2. 去中心化（去除 Global Bias）
+        top_bias = df['Top_Delta'].mean()
+        bot_bias = df['Bot_Delta'].mean()
+
+        df['Top_Delta_Centered'] = df['Top_Delta'] - top_bias
+        df['Bot_Delta_Centered'] = df['Bot_Delta'] - bot_bias
+
+
         # 3. 钢种频率编码
         if 'Steel Grade' in df.columns:
             grade_freq = df['Steel Grade'].value_counts(normalize=True).to_dict()
@@ -138,7 +146,7 @@ class SteelDataCleaner:
                 'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max',
                 'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min',
                 # 残差与剔除原因
-                'Top_Delta', 'Bot_Delta', 'Filter_Reason'
+                'Top_Delta', 'Bot_Delta','Top_Delta_Centered','Bot_Delta_Centered','Filter_Reason'
             ]
             cols_to_export = [c for c in cols_to_export if c in filtered_df.columns]
 

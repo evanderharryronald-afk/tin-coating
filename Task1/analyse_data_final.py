@@ -10,6 +10,14 @@ from data_cleaner import SteelDataCleaner
 from correlation_analyzer import SurfaceCorrelationAnalyzer
 from sklearn.linear_model import Ridge, HuberRegressor
 from sklearn.metrics import mean_absolute_error
+from scipy import stats as scipy_stats
+
+try:
+    from model_interpreter import ModelInterpreter
+    HAS_INTERPRETER = True
+except ImportError:
+    HAS_INTERPRETER = False
+    print("[提示] 未找到 model_interpreter 模块，将跳过 SHAP 分析。")
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -110,6 +118,103 @@ class ResidualCorrectionModel:
 
 
 # ==========================================
+# 3.5 残差诊断：训练vs测试对比 + 异方差检验
+# ==========================================
+def diagnose_residuals(
+    model_residuals_train, model_residuals_test,
+    pred_train, pred_test,
+    X_train, X_test,
+    surface,surface_cn, save_dir, n_bins=8
+):
+    """
+    对残差做三类诊断：
+    1. 训练集 vs 测试集残差分布对比（判断过拟合程度）
+    2. 残差 vs 预测值散点图（肉眼判断异方差，喇叭形/漏斗形即为异方差）
+    3. 按预测值分位数分箱，比较各箱残差方差（Levene检验做正式判断）
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # ---------- 1. 训练vs测试残差分布对比 ----------
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    sns.histplot(model_residuals_train, ax=axes[0], color='steelblue', label='训练集残差',
+                 kde=True, stat="density", alpha=0.4)
+    sns.histplot(model_residuals_test, ax=axes[0], color='orange', label='测试集残差',
+                 kde=True, stat="density", alpha=0.4)
+    axes[0].axvline(0, color='black', linestyle='--', linewidth=1)
+    axes[0].set_title(f'{surface_cn}表面 训练集vs测试集残差分布对比')
+    axes[0].set_xlabel('残差 (真实值-预测值)')
+    axes[0].legend()
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+
+    # 训练/测试关键统计量打印
+    print(f"\n-------- 【{surface_cn}表面 训练vs测试 残差统计对比】 --------")
+    print(f"{'':10s}{'均值':>10s}{'标准差':>10s}{'MAE':>10s}")
+    print(f"{'训练集':10s}{model_residuals_train.mean():>10.4f}{model_residuals_train.std():>10.4f}{model_residuals_train.abs().mean():>10.4f}")
+    print(f"{'测试集':10s}{model_residuals_test.mean():>10.4f}{model_residuals_test.std():>10.4f}{model_residuals_test.abs().mean():>10.4f}")
+    overfit_ratio = model_residuals_test.abs().mean() / max(model_residuals_train.abs().mean(), 1e-6)
+    print(f"过拟合比率 (测试MAE / 训练MAE) = {overfit_ratio:.2f}  (越接近1越好，>2 说明过拟合明显)")
+
+    # ---------- 2. 残差 vs 预测值散点图（异方差肉眼判断） ----------
+    axes[1].scatter(pred_train, model_residuals_train, s=8, alpha=0.3, color='steelblue', label='训练集')
+    axes[1].scatter(pred_test, model_residuals_test, s=8, alpha=0.5, color='orange', label='测试集')
+    axes[1].axhline(0, color='black', linestyle='--', linewidth=1)
+    axes[1].set_title(f'{surface_cn}表面 残差 vs 预测值（判断异方差用）')
+    axes[1].set_xlabel('模型预测值')
+    axes[1].set_ylabel('残差')
+    axes[1].legend()
+    axes[1].grid(True, linestyle=':', alpha=0.6)
+
+    plt.tight_layout()
+    diag_path = f"{save_dir}/residual_train_test_heteroscedasticity_{surface}.png"
+    plt.savefig(diag_path, dpi=300)
+    plt.close()
+    print(f"[图表保存] {surface_cn}表面 训练测试对比+异方差诊断图已保存至: {diag_path}")
+
+    # ---------- 3. 按预测值分位数分箱，比较各箱残差方差 ----------
+    test_df = pd.DataFrame({
+        'pred': pred_test.values if hasattr(pred_test, 'values') else pred_test,
+        'resid': model_residuals_test.values if hasattr(model_residuals_test, 'values') else model_residuals_test,
+    })
+    try:
+        test_df['bin'] = pd.qcut(test_df['pred'], q=n_bins, duplicates='drop')
+    except ValueError:
+        test_df['bin'] = pd.cut(test_df['pred'], bins=n_bins)
+
+    bin_stats = test_df.groupby('bin')['resid'].agg(['count', 'mean', 'std']).reset_index()
+    print(f"\n-------- 【{surface_cn}表面 按预测值分位数分箱的残差统计（测试集）】 --------")
+    print(bin_stats.to_string(index=False))
+
+    # Levene 检验：各箱方差是否显著不同（原假设：方差齐性/同方差）
+    groups = [g['resid'].values for _, g in test_df.groupby('bin') if len(g) >= 3]
+    levene_stat, levene_p = (np.nan, np.nan)
+    if len(groups) >= 2:
+        levene_stat, levene_p = scipy_stats.levene(*groups)
+        print(f"\nLevene 方差齐性检验: statistic={levene_stat:.4f}, p-value={levene_p:.4f}")
+        if levene_p < 0.05:
+            print("  -> p < 0.05，拒绝方差齐性假设，存在显著异方差性（不同预测值区间残差波动大小不同）")
+        else:
+            print("  -> p >= 0.05，未发现显著异方差性证据")
+    print("------------------------------------------------------\n")
+
+    # 【新增】汇总关键诊断指标，供后续统一落表
+    summary_metrics = {
+        '训练集残差均值': model_residuals_train.mean(),
+        '训练集残差标准差': model_residuals_train.std(),
+        '训练集MAE': model_residuals_train.abs().mean(),
+        '测试集残差均值': model_residuals_test.mean(),
+        '测试集残差标准差': model_residuals_test.std(),
+        '测试集MAE': model_residuals_test.abs().mean(),
+        '过拟合比率(测试MAE/训练MAE)': model_residuals_test.abs().mean() / max(model_residuals_train.abs().mean(), 1e-6),
+        'Levene统计量': levene_stat,
+        'Levene_p值': levene_p,
+        '是否存在显著异方差': (levene_p < 0.05) if not np.isnan(levene_p) else None,
+    }
+
+    return bin_stats, summary_metrics
+
+
+# ==========================================
 # 4. 表面建模与图形输出
 # ==========================================
 def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
@@ -164,6 +269,7 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         speed_col,
         'Dimension_[mm]_Width',
         'Dimension_[mm]_Thickness',
+        # 'Dimension_[mm]_Length',
         'Steel_Grade_Encoded'
     ]
     online_feature_idx = feature_cols.index(online_col)
@@ -171,6 +277,7 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
 
     X = df[feature_cols]
 
+    # delta_col = f'{prefix}_Delta_Centered'
     delta_col = f'{prefix}_Delta'
     y_delta = df[delta_col]
     online_actual = df[online_col]
@@ -208,11 +315,49 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
 
     pred_series, predicted_delta_smooth = corrector.predict_smooth(X_test, actual_test)
 
+    # 【新增】训练集上也跑一次预测，用于判断过拟合程度和异方差性
+    pred_train_series, _ = corrector.predict_smooth(X_train, actual_train)
+
     y_true_series = y_true_test
     online_series = actual_test
 
     raw_residuals = y_true_series - online_series
     model_residuals = y_true_series - pred_series
+
+    # 【新增】训练集残差，用于对比诊断
+    model_residuals_train = y_true_train - pred_train_series
+
+    # 【新增】训练vs测试残差对比 + 异方差诊断（三合一函数，见上方定义）
+    resid_bin_stats, resid_summary_metrics = diagnose_residuals(
+        model_residuals_train=model_residuals_train,
+        model_residuals_test=model_residuals,
+        pred_train=pred_train_series,
+        pred_test=pred_series,
+        X_train=X_train,
+        X_test=X_test,
+        surface=surface,
+        surface_cn=surface_cn,
+        save_dir="result/fitting_result/residual_diagnosis",
+    )
+
+    # 【新增】SHAP 特征解释性分析（若 model_interpreter 模块可用）
+    if HAS_INTERPRETER:
+        interp_dir = f"result/fitting_result/interpretation/{surface}"
+        interpreter = ModelInterpreter(
+            model=corrector,  # 内部会取 .model
+            X=X_train,
+            feature_names=feature_cols,
+            save_dir=interp_dir,
+            max_samples_for_shap=500,
+        )
+        interpreter.full_analysis(
+            y=None,
+            run_permutation=False,
+            run_shap=True,
+            run_pdp=True,
+            pdp_features=feature_cols[:5],
+        )
+        print(f"[SHAP分析] {surface_cn}表面 特征解释性分析结果已保存至: {interp_dir}")
 
     # ----------------------------------------------------
     # 【新增】导出逐行残差结果，便于定位图上那些异常大的离群点具体是哪条数据
@@ -288,41 +433,52 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
 
     print(f"\n======== 【{surface_cn}表面 Baseline + 模型 对比（测试集）】 ========")
 
+    # 【改动】把各模型对比结果同时存进列表，最后转成 DataFrame，而不只是打印
+    baseline_rows = []
+
     # Online
     r2 = r2_score(y_true_test, actual_test)
     rmse = np.sqrt(mean_squared_error(y_true_test, actual_test))
     mae = mean_absolute_error(y_true_test, actual_test)
     print(f"{'Online (无校正)':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'Online(无校正)', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
 
     # Naive Mean
     r2 = r2_score(y_true_test, pred_naive_mean)
     rmse = np.sqrt(mean_squared_error(y_true_test, pred_naive_mean))
     mae = mean_absolute_error(y_true_test, pred_naive_mean)
     print(f"{'Naive Mean Δ':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'Naive Mean', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
 
     # Naive Median
     r2 = r2_score(y_true_test, pred_naive_median)
     rmse = np.sqrt(mean_squared_error(y_true_test, pred_naive_median))
     mae = mean_absolute_error(y_true_test, pred_naive_median)
     print(f"{'Naive Median Δ':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'Naive Median', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
 
     # Ridge
     r2 = r2_score(y_true_test, pred_ridge)
     rmse = np.sqrt(mean_squared_error(y_true_test, pred_ridge))
     mae = mean_absolute_error(y_true_test, pred_ridge)
     print(f"{'Ridge':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'Ridge', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
 
     # Huber
     r2 = r2_score(y_true_test, pred_huber)
     rmse = np.sqrt(mean_squared_error(y_true_test, pred_huber))
     mae = mean_absolute_error(y_true_test, pred_huber)
     print(f"{'Huber':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'Huber', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
 
     # GBDT
     r2 = r2_score(y_true_test, pred_series)
     rmse = np.sqrt(mean_squared_error(y_true_test, pred_series))
     mae = mean_absolute_error(y_true_test, pred_series)
     print(f"{'GBDT (当前模型)':20s} -> R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    baseline_rows.append({'模型': 'GBDT(当前模型)', 'R2': r2, 'RMSE': rmse, 'MAE': mae})
+
+    baseline_comparison_df = pd.DataFrame(baseline_rows)
 
     # ---------- 双向 MAE 对比（表格形式） ----------
     raw_residuals = y_true_test - actual_test
@@ -359,6 +515,14 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     print(row_neg)
 
     print("-" * len(header))
+
+    # 【新增】把双向MAE对比也转成结构化 DataFrame
+    bidirectional_rows = []
+    for name, pred in models.items():
+        mae_pos = (y_true_test[mask_pos] - pred[mask_pos]).abs().mean() if mask_pos.sum() > 0 else np.nan
+        mae_neg = (y_true_test[mask_neg] - pred[mask_neg]).abs().mean() if mask_neg.sum() > 0 else np.nan
+        bidirectional_rows.append({'模型': name, '在线偏低时MAE': mae_pos, '在线偏高时MAE': mae_neg})
+    bidirectional_df = pd.DataFrame(bidirectional_rows)
 
     # 5. 拟合对比图
     plt.figure(figsize=(12, 5))
@@ -410,7 +574,113 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
     print(f"[图表保存] {surface_cn}表面残差分析图已保存至: {res_img_path}")
     # plt.show()
 
-    return corrector
+    # 【新增】把本次运行所有关键结果打包成一个字典返回，供主流程统一落表
+    overall_metrics_df = pd.DataFrame([
+        {'指标': '原始在线R2', '数值': r2_online},
+        {'指标': '原始在线RMSE', '数值': rmse_online},
+        {'指标': '模型校正R2', '数值': r2_model},
+        {'指标': '模型校正RMSE', '数值': rmse_model},
+        {'指标': '离群点数量(>3倍std)', '数值': n_outliers},
+        {'指标': '测试集样本数', '数值': len(X_test)},
+        {'指标': '训练集样本数', '数值': len(X_train)},
+    ])
+
+    surface_report = {
+        'surface': surface,
+        'surface_cn': surface_cn,
+        'params': default_config,
+        'overall_metrics': overall_metrics_df,        # 整体R2/RMSE等
+        'baseline_comparison': baseline_comparison_df,  # 各模型(Online/Ridge/Huber/GBDT等)对比
+        'bidirectional_mae': bidirectional_df,          # 双向MAE对比
+        'residual_diagnosis_summary': pd.DataFrame([resid_summary_metrics]),  # 训练/测试对比、过拟合比率、Levene检验
+        'residual_bin_stats': resid_bin_stats,          # 分位数分箱残差方差表
+        'outlier_detail': result_detail,                # 逐行离群点明细
+    }
+
+    return corrector, surface_report
+
+
+# ==========================================
+# 4.5 结果统一落表：多sheet Excel（横向对比布局） + 长格式CSV
+# ==========================================
+def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_report.xlsx"):
+    """
+    把多个 surface_report（run_surface_pipeline 的第二个返回值）汇总导出：
+    1. 一个多sheet Excel：关键对比类sheet做成"指标为行、表面/模型为列"的横向布局，
+       方便左右对比Top/Bot或不同模型；明细类sheet（分箱、离群点）保持纵向记录形式。
+    2. 一份长格式CSV（run_summary_long.csv）：一行一个(surface, 指标)，方便跨多次实验拼接对比
+    """
+    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
+
+    def _tag_surface(df, surface_cn):
+        df = df.copy()
+        df.insert(0, '表面', surface_cn)
+        return df
+
+    overall_all = pd.concat([_tag_surface(r['overall_metrics'], r['surface_cn']) for r in reports], ignore_index=True)
+    baseline_all = pd.concat([_tag_surface(r['baseline_comparison'], r['surface_cn']) for r in reports], ignore_index=True)
+    bidir_all = pd.concat([_tag_surface(r['bidirectional_mae'], r['surface_cn']) for r in reports], ignore_index=True)
+    resid_summary_all = pd.concat([_tag_surface(r['residual_diagnosis_summary'], r['surface_cn']) for r in reports], ignore_index=True)
+    resid_bins_all = pd.concat([_tag_surface(r['residual_bin_stats'], r['surface_cn']) for r in reports], ignore_index=True)
+    outliers_all = pd.concat([_tag_surface(r['outlier_detail'].reset_index(), r['surface_cn']) for r in reports], ignore_index=True)
+
+    # 参数配置表（每次跑用的超参数，方便追溯是哪次实验的结果）
+    params_rows = []
+    for r in reports:
+        row = {'表面': r['surface_cn']}
+        row.update(r['params'])
+        params_rows.append(row)
+    params_all = pd.DataFrame(params_rows)
+
+    # ---------- 横向布局1：整体拟合指标（指标为行，表面为列） ----------
+    overall_wide = overall_all.pivot(index='指标', columns='表面', values='数值').reset_index()
+
+    # ---------- 横向布局2：多模型对比（模型为行，"表面_指标"为列） ----------
+    baseline_long = baseline_all.melt(id_vars=['表面', '模型'], value_vars=['R2', 'RMSE', 'MAE'],
+                                       var_name='指标', value_name='数值')
+    baseline_wide = baseline_long.pivot_table(index='模型', columns=['表面', '指标'], values='数值')
+    baseline_wide.columns = [f'{surface}_{metric}' for surface, metric in baseline_wide.columns]
+    baseline_wide = baseline_wide.reset_index()
+
+    # ---------- 横向布局3：双向MAE对比（模型为行，"表面_方向"为列） ----------
+    bidir_pos = bidir_all.pivot_table(index='模型', columns='表面', values='在线偏低时MAE')
+    bidir_pos.columns = [f'{c}_偏低MAE' for c in bidir_pos.columns]
+    bidir_neg = bidir_all.pivot_table(index='模型', columns='表面', values='在线偏高时MAE')
+    bidir_neg.columns = [f'{c}_偏高MAE' for c in bidir_neg.columns]
+    bidir_wide = pd.concat([bidir_pos, bidir_neg], axis=1).reset_index()
+
+    # ---------- 横向布局4：残差诊断（指标为行，表面为列，与整体指标风格统一） ----------
+    resid_summary_wide = resid_summary_all.set_index('表面').T.reset_index().rename(columns={'index': '指标'})
+
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        params_all.to_excel(writer, sheet_name='运行参数配置', index=False)
+        overall_wide.to_excel(writer, sheet_name='整体拟合指标', index=False)
+        baseline_wide.to_excel(writer, sheet_name='多模型对比', index=False)
+        bidir_wide.to_excel(writer, sheet_name='双向MAE对比', index=False)
+        resid_summary_wide.to_excel(writer, sheet_name='残差过拟合与异方差诊断', index=False)
+        # 明细类表格保持纵向记录形式，横向对比在这里没有意义
+        resid_bins_all.to_excel(writer, sheet_name='残差分位数分箱明细', index=False)
+        outliers_all.to_excel(writer, sheet_name='离群点明细', index=False)
+
+    print(f"\n[汇总导出] 多sheet Excel 报告已保存至: {excel_path}")
+
+    # ---------- 长格式CSV，方便未来多次实验对比追踪（结构不变，供程序读取而非人工浏览） ----------
+    run_ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+    long_rows = []
+    for r in reports:
+        for _, row in r['overall_metrics'].iterrows():
+            long_rows.append({'运行时间': run_ts, '表面': r['surface_cn'], '来源': '整体拟合指标',
+                               '指标': row['指标'], '数值': row['数值']})
+        for _, row in r['residual_diagnosis_summary'].iterrows():
+            for col in row.index:
+                long_rows.append({'运行时间': run_ts, '表面': r['surface_cn'], '来源': '残差诊断',
+                                   '指标': col, '数值': row[col]})
+    long_df = pd.DataFrame(long_rows)
+
+    csv_path = "result/fitting_result/run_summary_long.csv"
+    write_header = not os.path.exists(csv_path)
+    long_df.to_csv(csv_path, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+    print(f"[汇总导出] 长格式追加记录已写入: {csv_path}（可多次运行累积对比不同实验配置）")
 
 
 # ==========================================
@@ -463,8 +733,12 @@ if __name__ == "__main__":
         "quantile": 0.3,
     }
 
-    run_surface_pipeline(clean_df, surface='Top', params=top_params)
-    run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+    # 【改动】接收 run_surface_pipeline 的第二个返回值（surface_report）
+    top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params)
+    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+
+    # 【新增】统一导出多sheet Excel + 长格式CSV
+    export_reports_to_excel([top_report, bot_report])
 
     # # -------------------------------------------------------------
     # # 方式 B：直接用关键字参数修改

@@ -123,6 +123,7 @@ class SurfaceCorrelationAnalyzer:
             'Speed[m/min]_Process_Avg',
             'Dimension_[mm]_Thickness',
             'Dimension_[mm]_Width',
+            # 'Dimension_[mm]_Length',
             'Steel_Grade_Encoded'
         ]
 

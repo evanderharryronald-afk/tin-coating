@@ -11,6 +11,7 @@ from correlation_analyzer import SurfaceCorrelationAnalyzer
 from sklearn.linear_model import Ridge, HuberRegressor
 from sklearn.metrics import mean_absolute_error
 from scipy import stats as scipy_stats
+from residual_diagnostics import run_full_residual_diagnostics
 
 try:
     from model_interpreter import ModelInterpreter
@@ -340,6 +341,21 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         save_dir="result/fitting_result/residual_diagnosis",
     )
 
+    # 【新增】完整版残差诊断
+    full_diag = run_full_residual_diagnostics(
+        y_true_train=y_true_train, y_true_test=y_true_test,
+        pred_train=pred_train_series, pred_test=pred_series,
+        X_train=X_train, X_test=X_test,
+        label=f"{surface_cn}表面",
+        save_dir=f"result/fitting_result/residual_diagnosis_full/{surface}",
+        tag=surface,
+        categorical_features=['Steel_Grade_Encoded'],  # 显式指定，避免被当成数值特征分箱
+        run_temporal=True,  # 你这里 train_test_split(shuffle=False)，测试集保持时间顺序，可以跑
+        run_explainability=True,
+    )
+
+
+
     # 【新增】SHAP 特征解释性分析（若 model_interpreter 模块可用）
     if HAS_INTERPRETER:
         interp_dir = f"result/fitting_result/interpretation/{surface}"
@@ -595,6 +611,10 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         'residual_diagnosis_summary': pd.DataFrame([resid_summary_metrics]),  # 训练/测试对比、过拟合比率、Levene检验
         'residual_bin_stats': resid_bin_stats,          # 分位数分箱残差方差表
         'outlier_detail': result_detail,                # 逐行离群点明细
+        # 新增三项残差分析
+        'residual_full_summary': pd.DataFrame([full_diag['summary_metrics']]),
+        'residual_hetero_bins_full': full_diag['heteroscedasticity_bin_stats'],
+        'residual_feature_significance': full_diag['feature_significance'],
     }
 
     return corrector, surface_report
@@ -623,6 +643,10 @@ def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_r
     resid_summary_all = pd.concat([_tag_surface(r['residual_diagnosis_summary'], r['surface_cn']) for r in reports], ignore_index=True)
     resid_bins_all = pd.concat([_tag_surface(r['residual_bin_stats'], r['surface_cn']) for r in reports], ignore_index=True)
     outliers_all = pd.concat([_tag_surface(r['outlier_detail'].reset_index(), r['surface_cn']) for r in reports], ignore_index=True)
+    full_summary_all = pd.concat([_tag_surface(r['residual_full_summary'], r['surface_cn']) for r in reports],
+                                 ignore_index=True)
+    feature_sig_all = pd.concat([_tag_surface(r['residual_feature_significance'], r['surface_cn']) for r in reports],
+                                ignore_index=True)
 
     # 参数配置表（每次跑用的超参数，方便追溯是哪次实验的结果）
     params_rows = []
@@ -661,6 +685,8 @@ def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_r
         # 明细类表格保持纵向记录形式，横向对比在这里没有意义
         resid_bins_all.to_excel(writer, sheet_name='残差分位数分箱明细', index=False)
         outliers_all.to_excel(writer, sheet_name='离群点明细', index=False)
+        full_summary_all.to_excel(writer, sheet_name='残差诊断完整版汇总', index=False)
+        feature_sig_all.to_excel(writer, sheet_name='残差特征显著性排序', index=False)
 
     print(f"\n[汇总导出] 多sheet Excel 报告已保存至: {excel_path}")
 
@@ -733,9 +759,43 @@ if __name__ == "__main__":
         "quantile": 0.3,
     }
 
+    top_params_optimized = {
+        # 物理/业务控制参数
+        "damping": 0.35,  # 略微提高阻尼，增加预测稳定性
+        "pos_boost": 1.2,  # 保持适度的正向残差补偿权重
+        "alpha_smoothing": 0.90,
+
+        # 结构约束参数（核心防过拟合）
+        "learning_rate": 0.02,  # 减半学习率，让拟合更平滑
+        "max_iter": 400,  # 结合小学习率，适当增加迭代轮数
+        "max_depth": 6,  # 核心：从 8 砍到 4，大幅降低树深度
+        "min_samples_leaf": 40,  # 新增：控制叶节点最少样本数，抑制噪声叶子
+
+        # 损失函数
+        "loss": "quantile",
+        "quantile": 0.8,  # 略降低目标分位数，减少极高值区间的上偏拉动
+    }
+
+    bot_params_optimized  = {
+        # 物理/业务控制参数
+        "damping": 0.60,
+        "pos_boost": 2.0,  # 核心：将过高的 7.88 降至 2.80，防止局部权重过载
+        "alpha_smoothing": 0.85,
+
+        # 结构约束参数（核心防过拟合）
+        "learning_rate": 0.0015,  # 减小学习率
+        "max_iter": 350,
+        "max_depth": 6,  # 核心：从 8 降至 5
+        "min_samples_leaf": 25,  # 新增：限制叶节点样本粒度
+
+        # 损失函数
+        "loss": "quantile",
+        "quantile": 0.35,  # 适度修正分位数
+    }
+
     # 【改动】接收 run_surface_pipeline 的第二个返回值（surface_report）
-    top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params)
-    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+    top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_optimized)
+    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params_optimized)
 
     # 【新增】统一导出多sheet Excel + 长格式CSV
     export_reports_to_excel([top_report, bot_report])

@@ -3,10 +3,13 @@ SurfaceEDAAnalyzer (generalized)
 ================================
 清洗后 / 建模前 / 建模后 的分布与影响分析模块。
 
+注意：本模块中的 "residual" 实际上指的是目标变量 Delta（偏差量 = 实验室值 - 在线测量值），
+而不是模型预测残差。Delta > 0 表示在线测量偏低，Delta < 0 表示在线测量偏高。
+
 设计目标（相对初版的增强）：
 - 不原地修改传入的 DataFrame
 - 列名与衍生特征可配置，硬编码降到最低
-- 支持 residual_col / residual Series / (y_true + y_pred) 三种残差输入
+- 支持 residual_col / residual Series / (y_true + y_pred) 三种输入方式
 - 统计与绘图解耦（可只算统计、不画图）
 - 支持 target_groups 白名单，与主流程达标组对齐
 - 返回统一 summary DataFrame，方便写入现有 Excel 报表
@@ -546,7 +549,344 @@ class SurfaceEDAAnalyzer:
                 random_state=random_state,
             )
 
+         # ========== 提取 LOWESS 摘要（仅当有特征时） ==========
+        stats_dict["lowess_summary"] = {}
+        for col in feature_cols:
+            if pd.api.types.is_numeric_dtype(data[col]):
+                stats_dict["lowess_summary"][col] = self._extract_lowess_summary(
+                    data=data,
+                    residual_col=residual_col,
+                    feature_col=col,
+                )
+
+        # ========== 提取时间趋势 ==========
+        if time_col and time_col in data.columns:
+            stats_dict["time_trend"] = self._extract_time_trend(
+                data=data,
+                residual_col=residual_col,
+                time_col=time_col,
+            )
+
+        # ========== 提取数据质量 ==========
+        all_cols = [residual_col] + feature_cols
+        stats_dict["data_quality"] = self._extract_data_quality(
+            data=data,
+            columns=all_cols,
+        )
+
         return stats_dict
+
+    # ==================================================================
+    #  从 LOWESS 拟合提取数值摘要
+    # ==================================================================
+    def _extract_lowess_summary(
+            self,
+            data: pd.DataFrame,
+            residual_col: str,
+            feature_col: str,
+            frac: float = 0.3,  # LOWESS 平滑参数，与 seaborn 默认一致
+    ) -> Dict:
+        """
+        从特征与 Delta 的散点中提取 LOWESS 曲线的数值摘要。
+        用于判断特征与偏差的关系方向、最优工作点、影响幅度。
+        """
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+
+        df = data[[feature_col, residual_col]].dropna()
+        if len(df) < 10:
+            return {
+                "trend_direction": "样本不足",
+                "extreme_x": np.nan,
+                "extreme_delta": np.nan,
+                "delta_range": np.nan,
+            }
+
+        # 计算 LOWESS
+        result = lowess(df[residual_col], df[feature_col], frac=frac, return_sorted=True)
+        x_sorted = result[:, 0]
+        y_sorted = result[:, 1]
+
+        # 1. 趋势方向判断
+        # 用线性回归拟合 LOWESS 曲线，判断整体斜率方向
+        slope, intercept = np.polyfit(x_sorted, y_sorted, 1)
+        if abs(slope) < 0.001 * (y_sorted.max() - y_sorted.min()) / (x_sorted.max() - x_sorted.min() + 1e-10):
+            trend = "平坦"
+        elif slope > 0:
+            trend = "上升"
+        else:
+            trend = "下降"
+
+        # 补充：检测 U 型或倒 U 型（二阶导数变化）
+        # 用二次拟合判断凹凸性
+        if len(x_sorted) > 5:
+            coeffs = np.polyfit(x_sorted, y_sorted, 2)
+            if coeffs[0] > 0:
+                shape = "U型"
+            elif coeffs[0] < 0:
+                shape = "倒U型"
+            else:
+                shape = "线性"
+            trend = f"{trend}({shape})"
+
+        # 2. 极值点（最小值点，即 Delta 最接近 0 的点）
+        abs_min_idx = np.argmin(np.abs(y_sorted))
+        extreme_x = x_sorted[abs_min_idx]
+        extreme_delta = y_sorted[abs_min_idx]
+
+        # 3. Delta 总变化幅度（特征两端对应的 Delta 差值）
+        # 取特征值 5% 分位数和 95% 分位数对应的 Delta 值
+        x_low = np.percentile(x_sorted, 5)
+        x_high = np.percentile(x_sorted, 95)
+        y_at_low = np.interp(x_low, x_sorted, y_sorted)
+        y_at_high = np.interp(x_high, x_sorted, y_sorted)
+        delta_range = abs(y_at_high - y_at_low)
+
+        return {
+            "trend_direction": trend,
+            "extreme_x": float(extreme_x),
+            "extreme_delta": float(extreme_delta),
+            "delta_range": float(delta_range),
+        }
+
+    # ==================================================================
+    # 从时间序列提取趋势摘要
+    # ==================================================================
+    def _extract_time_trend(
+            self,
+            data: pd.DataFrame,
+            residual_col: str,
+            time_col: str,
+    ) -> Dict:
+        """
+        从 Delta 随时间的变化中提取趋势摘要。
+        """
+        df = data[[time_col, residual_col]].dropna().sort_values(time_col)
+        if len(df) < 10:
+            return {
+                "trend_slope": np.nan,
+                "trend_pvalue": np.nan,
+                "trend_significant": False,
+                "cpk": np.nan,
+                "ppk": np.nan,
+            }
+
+        # 1. 趋势斜率 + p-value
+        # 将时间转换为数值（天数）
+        time_numeric = (df[time_col] - df[time_col].min()).dt.total_seconds() / (24 * 3600)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(time_numeric, df[residual_col])
+
+        # 2. CPK / PPK（需要规格限，这里用 3σ 作为近似规格限）
+        # 如果数据中没有规格限，使用 ±3σ 作为过程边界
+        delta_std = df[residual_col].std()
+        delta_mean = df[residual_col].mean()
+
+        # 假设规格限为 3σ（如果没有明确规格限）
+        # 注意：实际使用时，如果有明确的规格限（如 ±0.5），应替换
+        usl = delta_mean + 3 * delta_std
+        lsl = delta_mean - 3 * delta_std
+
+        if delta_std > 0:
+            cpu = (usl - delta_mean) / (3 * delta_std)
+            cpl = (delta_mean - lsl) / (3 * delta_std)
+            cpk = min(cpu, cpl)
+            ppk = cpk  # 简化：长期用同一个值
+        else:
+            cpk = np.nan
+            ppk = np.nan
+
+        return {
+            "trend_slope": float(slope),
+            "trend_pvalue": float(p_value),
+            "trend_significant": p_value < 0.05,
+            "cpk": float(cpk) if not np.isnan(cpk) else np.nan,
+            "ppk": float(ppk) if not np.isnan(ppk) else np.nan,
+        }
+
+    # ==================================================================
+    # 分组诊断摘要（用于规格组）
+    # ==================================================================
+    def _extract_group_diagnostics(
+            self,
+            data: pd.DataFrame,
+            residual_col: str,
+            group_col: str,
+    ) -> pd.DataFrame:
+        """
+        对每个规格组提取诊断信息：
+        - 均值、标准差
+        - 均值是否显著 ≠ 0（t 检验）
+        """
+        rows = []
+
+        for group_name, group_data in data.groupby(group_col):
+            if len(group_data) < 10:
+                continue
+
+            delta = group_data[residual_col].dropna()
+            mean_val = delta.mean()
+            std_val = delta.std()
+
+            # t 检验：均值是否显著 ≠ 0
+            t_stat, p_val = stats.ttest_1samp(delta, 0)
+
+            rows.append({
+                "规格组": str(group_name),
+                "样本数": len(delta),
+                "Delta均值": float(mean_val),
+                "Delta标准差": float(std_val),
+                "均值是否显著≠0": p_val < 0.05,
+                "t检验p值": float(p_val),
+            })
+
+        return pd.DataFrame(rows)
+
+    # ==================================================================
+    # 数据质量统计（缺失率 + 异常值占比）
+    # ==================================================================
+    def _extract_data_quality(
+            self,
+            data: pd.DataFrame,
+            columns: List[str],
+    ) -> pd.DataFrame:
+        """
+        统计指定列的缺失率和异常值占比（IQR 方法）。
+        """
+        rows = []
+
+        for col in columns:
+            if col not in data.columns:
+                continue
+
+            series = data[col]
+            total = len(series)
+
+            # 缺失率
+            missing_rate = series.isna().mean()
+
+            # 异常值占比（仅数值列）
+            outlier_rate = np.nan
+            if pd.api.types.is_numeric_dtype(series):
+                q1 = series.quantile(0.25)
+                q3 = series.quantile(0.75)
+                iqr = q3 - q1
+                lower = q1 - 1.5 * iqr
+                upper = q3 + 1.5 * iqr
+                if iqr > 0:
+                    outliers = ((series < lower) | (series > upper)).sum()
+                    outlier_rate = outliers / total
+
+            rows.append({
+                "特征名": col,
+                "缺失率": float(missing_rate) if not np.isnan(missing_rate) else 0.0,
+                "异常值占比": float(outlier_rate) if not np.isnan(outlier_rate) else np.nan,
+            })
+
+        return pd.DataFrame(rows)
+
+    # ==================================================================
+    # 构建 LOWESS 摘要 DataFrame
+    # ==================================================================
+    def _build_lowess_excel_df(self, result: Dict, surface: Optional[str] = None) -> pd.DataFrame:
+        """构建 特征-偏差关系摘要 DataFrame"""
+        rows = []
+        surface_label = surface if surface else result.get('surface', 'Unknown')
+
+        # 从整体分析中提取
+        overall_stats = result.get('stats', {}).get('overall', {})
+        lowess_summary = overall_stats.get('lowess_summary', {})
+
+        for feature_name, summary in lowess_summary.items():
+            rows.append({
+                '特征名': feature_name,
+                '表面': surface_label,
+                'LOWESS趋势方向': summary.get('trend_direction', ''),
+                '极值点x值': summary.get('extreme_x'),
+                '极值点Delta值': summary.get('extreme_delta'),
+                'Delta总变化幅度': summary.get('delta_range'),
+            })
+
+        return pd.DataFrame(rows)
+
+    # ==================================================================
+    # 构建分组诊断 DataFrame
+    # ==================================================================
+    def _build_group_diagnostic_excel_df(
+            self,
+            result: Dict,
+            group_col: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        构建规格组诊断 DataFrame。
+        注意：分组诊断信息在 _run_single_analysis 中并没有按分组保存，
+        需要从原始数据中提取，或者在 analyze 方法中传入分组数据。
+
+        这里简化实现：从 result 的 stats 中提取 by_group 的残差统计，
+        然后补充 t 检验结果。
+        """
+        rows = []
+
+        by_group = result.get('stats', {}).get('by_group', {})
+        if not by_group:
+            return pd.DataFrame()
+
+        for group_name, group_stats in by_group.items():
+            residual_stats = group_stats.get('residual', {})
+            n = residual_stats.get('count', 0)
+            mean_val = residual_stats.get('mean')
+            std_val = residual_stats.get('std')
+
+            if n < 10 or mean_val is None or std_val is None:
+                continue
+
+            # 计算 t 检验 p-value（用均值和样本量近似）
+            # t = mean / (std / sqrt(n))
+            if std_val > 0 and n > 1:
+                t_stat = mean_val / (std_val / np.sqrt(n))
+                # 使用 scipy 计算 p-value
+                from scipy import stats as sp_stats
+                p_val = sp_stats.t.sf(np.abs(t_stat), n - 1) * 2
+                is_significant = p_val < 0.05
+            else:
+                p_val = np.nan
+                is_significant = False
+
+            rows.append({
+                '规格组': str(group_name),
+                '样本数': n,
+                'Delta均值': float(mean_val) if mean_val is not None else np.nan,
+                'Delta标准差': float(std_val) if std_val is not None else np.nan,
+                '均值是否显著≠0': is_significant,
+                't检验p值': float(p_val) if not np.isnan(p_val) else np.nan,
+            })
+
+        return pd.DataFrame(rows)
+
+    # ==================================================================
+    # 构建时间趋势 DataFrame
+    # ==================================================================
+    def _build_time_trend_excel_df(self, result: Dict, surface: Optional[str] = None) -> pd.DataFrame:
+        """构建时间趋势诊断 DataFrame"""
+        rows = []
+        surface_label = result.get('surface', 'Unknown')
+
+        # 从整体分析中提取
+        overall_stats = result.get('stats', {}).get('overall', {})
+        time_trend = overall_stats.get('time_trend', {})
+
+        if not time_trend:
+            return pd.DataFrame()
+
+        rows.append({
+            '表面': surface_label,
+            '趋势斜率': time_trend.get('trend_slope'),
+            '趋势p值': time_trend.get('trend_pvalue'),
+            '趋势是否显著': time_trend.get('trend_significant', False),
+            'CPK': time_trend.get('cpk'),
+            'PPK': time_trend.get('ppk'),
+        })
+
+        return pd.DataFrame(rows)
+
 
     # ------------------------------------------------------------------
     # 统计描述（与绘图解耦）
@@ -566,8 +906,8 @@ class SurfaceEDAAnalyzer:
                 "max": np.nan,
                 "skew": np.nan,
                 "kurtosis": np.nan,
-                "pos_ratio": np.nan,
-                "neg_ratio": np.nan,
+                "pos_ratio": np.nan,  # 正值比例（Delta > 0 表示在线测量偏低）
+                "neg_ratio": np.nan,  # 负值比例（Delta < 0 表示在线测量偏高）
             }
         return {
             "count": int(s.count()),
@@ -580,8 +920,8 @@ class SurfaceEDAAnalyzer:
             "max": float(s.max()),
             "skew": float(s.skew()),
             "kurtosis": float(s.kurtosis()),
-            "pos_ratio": float((s > 0).mean()),
-            "neg_ratio": float((s < 0).mean()),
+            "pos_ratio": float((s > 0).mean()),  # 正值比例
+            "neg_ratio": float((s < 0).mean()),  # 负值比例
         }
 
     # ------------------------------------------------------------------
@@ -635,40 +975,40 @@ class SurfaceEDAAnalyzer:
     ) -> None:
         """
         将 EDA 分析结果导出为格式化的 Excel 文件
-
-        Parameters
-        ----------
-        result : analyze() 的返回值
-        output_path : Excel 文件保存路径
-        surface : 表面名称 ('Top' 或 'Bot')，用于标识
-        group_col : 分组列名
         """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # 构建各 Sheet 的数据
+        # 原有：构建各 Sheet 的数据
         residual_df = self._build_residual_excel_df(result, surface)
         feature_df = self._build_feature_excel_df(result, surface)
 
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Sheet 1: 残差统计汇总
-            if not residual_df.empty:
-                residual_df.to_excel(writer, sheet_name='残差统计汇总', index=False)
+        # ====== 新增：构建新增 Sheet 的数据 ======
+        lowess_df = self._build_lowess_excel_df(result)
+        group_diag_df = self._build_group_diagnostic_excel_df(result, group_col)
+        time_trend_df = self._build_time_trend_excel_df(result)
 
-            # Sheet 2: 特征统计汇总
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # 原有 Sheet
+            if not residual_df.empty:
+                residual_df.to_excel(writer, sheet_name='偏差量统计汇总', index=False)
             if not feature_df.empty:
                 feature_df.to_excel(writer, sheet_name='特征统计汇总', index=False)
 
-            # Sheet 3: 数据质量报告（可选）
-            quality_df = self._build_quality_excel_df(result)
-            if not quality_df.empty:
-                quality_df.to_excel(writer, sheet_name='数据质量报告', index=False)
+            # ====== 新增 Sheet ======
+            if not lowess_df.empty:
+                lowess_df.to_excel(writer, sheet_name='特征-偏差关系摘要', index=False)
+            if not group_diag_df.empty:
+                group_diag_df.to_excel(writer, sheet_name='规格组诊断', index=False)
+            if not time_trend_df.empty:
+                time_trend_df.to_excel(writer, sheet_name='时间趋势诊断', index=False)
 
         # 应用 Excel 格式
         self._apply_excel_formatting(output_path)
         print(f"  [Excel 导出] 总结表格已保存至: {output_path}")
 
+
     def _build_residual_excel_df(self, result: Dict, surface: Optional[str] = None) -> pd.DataFrame:
-        """构建残差统计汇总 DataFrame"""
+        """构建偏差量（Delta）统计汇总 DataFrame"""
         rows = []
         surface_label = surface if surface else "Unknown"
 
@@ -721,21 +1061,11 @@ class SurfaceEDAAnalyzer:
 
         return pd.DataFrame(rows)
 
-    def _build_quality_excel_df(self, result: Dict) -> pd.DataFrame:
-        """构建数据质量报告"""
-        n_samples = result.get('n_samples', 0)
-        n_features = len(result.get('feature_cols', []))
-
-        return pd.DataFrame([{
-            '指标': '样本数',
-            '数值': n_samples,
-        }, {
-            '指标': '特征数',
-            '数值': n_features,
-        }])
-
     def _stats_to_row(self, group_name: str, scope: str, stats: Dict, surface: str) -> Dict:
-        """将统计字典转换为行数据"""
+        """将统计字典转换为行数据
+        pos_ratio: Delta > 0 的比例（在线测量偏低，需要正向补偿）
+        neg_ratio: Delta < 0 的比例（在线测量偏高，需要负向补偿）
+        """
         return {
             '规格组': group_name,
             'scope': scope,
@@ -1070,25 +1400,6 @@ def run_global_eda(
 ) -> Dict[str, Any]:
     """
     对全量数据做训练前的 EDA 分析（支持多表面、分规格组）
-
-    Parameters
-    ----------
-    df : 输入 DataFrame（原始数据，函数内部会 copy）
-    surface_list : ['Top', 'Bot'] 或 ['Top'] 或 ['Bot']，默认 ['Top', 'Bot']
-    group_col : 分组列名，默认 'Setpoint_Group_Label'
-    target_groups : 要分析的白名单规格组，None 表示自动筛选达标组
-    min_samples : 达标组最小样本阈值
-    save_root : 保存根目录（每个 surface 会创建子目录）
-    time_col : 时间列名
-    max_groups : 分规格分析时最多展示多少组
-    feature_cols_override : 自定义特征列，例如 {"Top": [...], "Bot": [...]}
-    enable_overall : 是否做整体分析
-    enable_by_group : 是否做分组分析
-    plot_train_test / plot_model_residual : 关闭不需要的绘图
-
-    Returns
-    -------
-    dict : 每个 surface 的分析结果
     """
     if surface_list is None:
         surface_list = ["Top", "Bot"]
@@ -1110,7 +1421,6 @@ def run_global_eda(
         online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
         setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
 
-
         # 衍生 Current_Per_Speed
         if current_col in work.columns and speed_col in work.columns:
             if per_speed not in work.columns:
@@ -1125,8 +1435,7 @@ def run_global_eda(
         if feature_cols_override and surface in feature_cols_override:
             feature_cols = feature_cols_override[surface]
         else:
-            # 使用默认特征
-            feature_cols = get_feature_cols(surface)  # 需要从外部导入或复制定义
+            feature_cols = get_feature_cols(surface)
 
         # 3. 确定 target_groups（自动筛选达标组）
         if target_groups is None:
@@ -1158,26 +1467,51 @@ def run_global_eda(
         results[surface] = result
         print(f"[全量 EDA] {surface} 完成，结果保存至: {save_dir}")
 
-    # 在所有 surface 分析完成后，生成综合 Excel 报告
+    # ================================================================
+    # 在所有 surface 分析完成后，生成综合 Excel 报告（增强版）
+    # ================================================================
     try:
         from openpyxl import Workbook
         combined_path = os.path.join(save_root, "eda_summary_combined.xlsx")
 
         with pd.ExcelWriter(combined_path, engine='openpyxl') as writer:
             for surface, result in results.items():
-                # 残差统计
+                # ---- 原有 Sheet ----
+                # 1. 偏差量统计汇总
                 residual_df = eda._build_residual_excel_df(result, surface)
                 if not residual_df.empty:
-                    residual_df.to_excel(writer, sheet_name=f'{surface}_残差统计', index=False)
+                    residual_df.to_excel(writer, sheet_name=f'{surface}_偏差量统计', index=False)
 
-                # 特征统计
+                # 2. 特征统计汇总
                 feature_df = eda._build_feature_excel_df(result, surface)
                 if not feature_df.empty:
                     feature_df.to_excel(writer, sheet_name=f'{surface}_特征统计', index=False)
 
+
+                # ---- 新增 Sheet ----
+                # 4. 特征-偏差关系摘要（LOWESS）
+                lowess_df = eda._build_lowess_excel_df(result, surface)
+                if not lowess_df.empty:
+                    lowess_df.to_excel(writer, sheet_name=f'{surface}_特征-偏差关系', index=False)
+
+                # 5. 规格组诊断（仅当有分组数据时）
+                if enable_by_group and group_col:
+                    group_diag_df = eda._build_group_diagnostic_excel_df(result, group_col)
+                    if not group_diag_df.empty:
+                        group_diag_df.to_excel(writer, sheet_name=f'{surface}_规格组诊断', index=False)
+
+                # 6. 时间趋势诊断（仅当有时间列且有整体分析时）
+                if enable_overall and time_col:
+                    time_trend_df = eda._build_time_trend_excel_df(result)
+                    if not time_trend_df.empty:
+                        time_trend_df.to_excel(writer, sheet_name=f'{surface}_时间趋势', index=False)
+
         print(f"\n[综合 Excel] 已保存至: {combined_path}")
+
     except Exception as e:
+        import traceback
         print(f"[警告] 综合 Excel 导出失败: {e}")
+        traceback.print_exc()
 
     return results
 

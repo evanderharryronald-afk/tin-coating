@@ -32,8 +32,12 @@ class SteelDataCleaner:
         df['Bot_Current_Sum'] = df[bot_curr_cols].sum(axis=1)
         df['Top_Current_Sum'] = df[top_curr_cols].sum(axis=1)
 
+        # 计算每米速度的电流消耗（与理论因子类似，但不除以宽度）
         df['Width_m'] = df['Dimension_[mm]_Width'] / 1000.0
         speed = df['Speed[m/min]_Process_Avg'].replace(0, np.nan)
+
+        df['Top_Current_Per_Speed'] = df['Top_Current_Sum'] / speed
+        df['Bot_Current_Per_Speed'] = df['Bot_Current_Sum'] / speed
 
         df['Top_Theoretical_Factor'] = df['Top_Current_Sum'] / (speed * df['Width_m'])
         df['Bot_Theoretical_Factor'] = df['Bot_Current_Sum'] / (speed * df['Width_m'])

@@ -409,7 +409,7 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     feature_cols = [
         online_col,
         current_col,
-        f'{prefix}_Weight_Deviation',
+        # f'{prefix}_Weight_Deviation',
         f'{prefix}_Current_Per_Speed',
         f'{prefix}_Theoretical_Factor',
         speed_col,

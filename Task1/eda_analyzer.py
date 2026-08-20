@@ -18,7 +18,9 @@ from __future__ import annotations
 import os
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
-
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.formatting.rule import ColorScaleRule
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -332,6 +334,20 @@ class SurfaceEDAAnalyzer:
         # ---------- 8. 统一 summary DataFrame ----------
         result["summary_df"] = self._build_summary_df(result["stats"], residual_col)
 
+        # ========== 导出 Excel 总结 ==========
+        if not compute_stats_only and out_dir:
+            try:
+                excel_path = os.path.join(out_dir, "eda_summary.xlsx")
+                self.export_summary_to_excel(
+                    result=result,
+                    output_path=excel_path,
+                    surface=surface_cn if surface_cn else None,
+                    group_col=group_col,
+                )
+            except Exception as e:
+                print(f"  [警告] Excel 导出失败: {e}")
+        # ===========================================
+
         if not compute_stats_only:
             print(f"\n[完成] 所有图表与统计已保存至: {out_dir}")
         else:
@@ -608,6 +624,202 @@ class SurfaceEDAAnalyzer:
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame(rows)
+
+    # ========== Excel 总结导出方法 ==========
+    def export_summary_to_excel(
+            self,
+            result: Dict[str, Any],
+            output_path: str,
+            surface: Optional[str] = None,
+            group_col: Optional[str] = None,
+    ) -> None:
+        """
+        将 EDA 分析结果导出为格式化的 Excel 文件
+
+        Parameters
+        ----------
+        result : analyze() 的返回值
+        output_path : Excel 文件保存路径
+        surface : 表面名称 ('Top' 或 'Bot')，用于标识
+        group_col : 分组列名
+        """
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # 构建各 Sheet 的数据
+        residual_df = self._build_residual_excel_df(result, surface)
+        feature_df = self._build_feature_excel_df(result, surface)
+
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Sheet 1: 残差统计汇总
+            if not residual_df.empty:
+                residual_df.to_excel(writer, sheet_name='残差统计汇总', index=False)
+
+            # Sheet 2: 特征统计汇总
+            if not feature_df.empty:
+                feature_df.to_excel(writer, sheet_name='特征统计汇总', index=False)
+
+            # Sheet 3: 数据质量报告（可选）
+            quality_df = self._build_quality_excel_df(result)
+            if not quality_df.empty:
+                quality_df.to_excel(writer, sheet_name='数据质量报告', index=False)
+
+        # 应用 Excel 格式
+        self._apply_excel_formatting(output_path)
+        print(f"  [Excel 导出] 总结表格已保存至: {output_path}")
+
+    def _build_residual_excel_df(self, result: Dict, surface: Optional[str] = None) -> pd.DataFrame:
+        """构建残差统计汇总 DataFrame"""
+        rows = []
+        surface_label = surface if surface else "Unknown"
+
+        # 1. 整体统计
+        overall_stats = result.get('stats', {}).get('overall', {}).get('residual', {})
+        if overall_stats:
+            rows.append(self._stats_to_row('ALL (整体)', None, overall_stats, surface_label))
+
+        # 2. 分组统计
+        by_group = result.get('stats', {}).get('by_group', {})
+        for group_name, group_stats in by_group.items():
+            residual_stats = group_stats.get('residual', {})
+            if residual_stats:
+                rows.append(self._stats_to_row(str(group_name), '分组', residual_stats, surface_label))
+
+        # 3. 模型残差（如果有）
+        model_residual = result.get('stats', {}).get('model_residual', {}).get('residual', {})
+        if model_residual:
+            rows.append(self._stats_to_row('模型残差', 'model', model_residual, surface_label))
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        # 列顺序调整
+        col_order = ['规格组', 'scope', '表面', '样本数', '均值', '标准差', '中位数',
+                     '最小值', '最大值', '偏度', '峰度', '正偏差比例(%)', '负偏差比例(%)']
+        existing_cols = [c for c in col_order if c in df.columns]
+        return df[existing_cols]
+
+    def _build_feature_excel_df(self, result: Dict, surface: Optional[str] = None) -> pd.DataFrame:
+        """构建特征统计汇总 DataFrame"""
+        rows = []
+        surface_label = surface if surface else "Unknown"
+
+        overall_stats = result.get('stats', {}).get('overall', {}).get('features', {})
+        for feature_name, feature_stats in overall_stats.items():
+            rows.append({
+                '特征名称': feature_name,
+                '表面': surface_label,
+                '样本数': feature_stats.get('count'),
+                '均值': feature_stats.get('mean'),
+                '标准差': feature_stats.get('std'),
+                '最小值': feature_stats.get('min'),
+                '中位数': feature_stats.get('median'),
+                '最大值': feature_stats.get('max'),
+                '偏度': feature_stats.get('skew'),
+                '峰度': feature_stats.get('kurtosis'),
+            })
+
+        return pd.DataFrame(rows)
+
+    def _build_quality_excel_df(self, result: Dict) -> pd.DataFrame:
+        """构建数据质量报告"""
+        n_samples = result.get('n_samples', 0)
+        n_features = len(result.get('feature_cols', []))
+
+        return pd.DataFrame([{
+            '指标': '样本数',
+            '数值': n_samples,
+        }, {
+            '指标': '特征数',
+            '数值': n_features,
+        }])
+
+    def _stats_to_row(self, group_name: str, scope: str, stats: Dict, surface: str) -> Dict:
+        """将统计字典转换为行数据"""
+        return {
+            '规格组': group_name,
+            'scope': scope,
+            '表面': surface,
+            '样本数': stats.get('count'),
+            '均值': stats.get('mean'),
+            '标准差': stats.get('std'),
+            '中位数': stats.get('median'),
+            '最小值': stats.get('min'),
+            '最大值': stats.get('max'),
+            '偏度': stats.get('skew'),
+            '峰度': stats.get('kurtosis'),
+            '正偏差比例(%)': stats.get('pos_ratio', 0) * 100 if stats.get('pos_ratio') else None,
+            '负偏差比例(%)': stats.get('neg_ratio', 0) * 100 if stats.get('neg_ratio') else None,
+        }
+
+    def _apply_excel_formatting(self, filepath: str) -> None:
+        """应用 Excel 格式（颜色、边框、列宽）"""
+        try:
+            wb = load_workbook(filepath)
+
+            # 定义样式
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            center_alignment = Alignment(horizontal='center', vertical='center')
+
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                if ws.max_row == 1:
+                    continue
+
+                # 表头样式
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.border = border
+                    cell.alignment = center_alignment
+
+                # 数据边框 + 居中对齐
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        cell.border = border
+                        if isinstance(cell.value, (int, float)):
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+                # 自动列宽
+                for column in ws.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if cell.value is not None:
+                                cell_len = len(str(cell.value))
+                                if cell_len > max_length:
+                                    max_length = cell_len
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 30)
+                    ws.column_dimensions[column_letter].width = adjusted_width
+
+                # 条件格式：正偏差比例（越高越需要关注）
+                for col_idx, cell in enumerate(ws[1], 1):
+                    if cell.value and '正偏差比例' in str(cell.value):
+                        if ws.max_row >= 2:
+                            color_scale = ColorScaleRule(
+                                start_type='min', start_color='63BE7B',
+                                mid_type='percentile', mid_value=50, mid_color='FED976',
+                                end_type='max', end_color='F03B20'
+                            )
+                            ws.conditional_formatting.add(
+                                f'{cell.column_letter}2:{cell.column_letter}{ws.max_row}',
+                                color_scale
+                            )
+                        break
+
+            wb.save(filepath)
+        except Exception as e:
+            print(f"  [警告] Excel 格式应用失败: {e}")
 
     # ------------------------------------------------------------------
     # 绘图工具
@@ -946,9 +1158,28 @@ def run_global_eda(
         results[surface] = result
         print(f"[全量 EDA] {surface} 完成，结果保存至: {save_dir}")
 
+    # 在所有 surface 分析完成后，生成综合 Excel 报告
+    try:
+        from openpyxl import Workbook
+        combined_path = os.path.join(save_root, "eda_summary_combined.xlsx")
+
+        with pd.ExcelWriter(combined_path, engine='openpyxl') as writer:
+            for surface, result in results.items():
+                # 残差统计
+                residual_df = eda._build_residual_excel_df(result, surface)
+                if not residual_df.empty:
+                    residual_df.to_excel(writer, sheet_name=f'{surface}_残差统计', index=False)
+
+                # 特征统计
+                feature_df = eda._build_feature_excel_df(result, surface)
+                if not feature_df.empty:
+                    feature_df.to_excel(writer, sheet_name=f'{surface}_特征统计', index=False)
+
+        print(f"\n[综合 Excel] 已保存至: {combined_path}")
+    except Exception as e:
+        print(f"[警告] 综合 Excel 导出失败: {e}")
+
     return results
-
-
 
 
 # ----------------------------------------------------------------------

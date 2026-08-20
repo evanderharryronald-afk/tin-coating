@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
+from sympy.codegen.fnodes import dimension
 
 # 中文字体兜底（环境若无对应字体则自动忽略）
 plt.rcParams["axes.unicode_minus"] = False
@@ -73,6 +74,8 @@ class SurfaceEDAAnalyzer:
         random_state: int = 42,
         # 镀层场景默认特征覆盖（可选）
         default_feature_map: Optional[Dict[str, List[str]]] = None,
+        enable_overall: bool = True,      # 是否做整体分析
+        enable_by_group: bool = True,     # 是否做分组分析
     ) -> Dict:
         """
         主分析入口。
@@ -97,6 +100,10 @@ class SurfaceEDAAnalyzer:
         Returns
         -------
         dict : 包含 residual_col、feature_cols、n_samples、paths、stats、summary_df
+
+        enable_overall : bool, default=True   是否执行整体（全量样本）EDA 分析
+        enable_by_group : bool, default=True  是否执行分规格 EDA 分析（需要 group_col 不为 None）
+
         """
         out_dir = save_dir if save_dir is not None else self.default_save_dir
         if not compute_stats_only:
@@ -187,34 +194,48 @@ class SurfaceEDAAnalyzer:
         }
 
         # ---------- 4. 整体分析 ----------
-        overall_dir = os.path.join(out_dir, "overall") if not compute_stats_only else None
-        if overall_dir:
-            os.makedirs(overall_dir, exist_ok=True)
-        result["stats"]["overall"] = self._run_single_analysis(
-            data=data,
-            residual_col=residual_col,
-            feature_cols=feature_cols,
-            time_col=time_col if has_time else None,
-            save_dir=overall_dir,
-            title_prefix=f"{surface_cn}整体" if surface_cn else "整体",
-            plot_univariate=plot_univariate and not compute_stats_only,
-            plot_vs_residual=plot_vs_residual and not compute_stats_only,
-            plot_time=plot_time and not compute_stats_only,
-            sample_for_scatter=sample_for_scatter,
-            random_state=random_state,
-            figsize_univariate=figsize_univariate,
-            compute_stats_only=compute_stats_only,
-        )
-        if overall_dir:
-            result["paths"]["overall"] = overall_dir
+        if enable_overall:
+            overall_dir = os.path.join(out_dir, "overall") if not compute_stats_only else None
+            if overall_dir:
+                os.makedirs(overall_dir, exist_ok=True)
+
+            print(f"\n{'=' * 50}")
+            print(f"[整体分析] 开始处理全部样本 (n={len(data)})")
+            print(f"{'=' * 50}")
+
+            result["stats"]["overall"] = self._run_single_analysis(
+                data=data,
+                residual_col=residual_col,
+                feature_cols=feature_cols,
+                time_col=time_col if has_time else None,
+                save_dir=overall_dir,
+                title_prefix=f"{surface_cn}整体" if surface_cn else "整体",
+                plot_univariate=plot_univariate and not compute_stats_only,
+                plot_vs_residual=plot_vs_residual and not compute_stats_only,
+                plot_time=plot_time and not compute_stats_only,
+                sample_for_scatter=sample_for_scatter,
+                random_state=random_state,
+                figsize_univariate=figsize_univariate,
+                compute_stats_only=compute_stats_only,
+            )
+            if overall_dir:
+                result["paths"]["overall"] = overall_dir
+            print(f"[整体分析] 完成")
+        else:
+            print(f"\n[整体分析] 已跳过 (enable_overall=False)")
 
         # ---------- 5. 分规格分析 ----------
-        if group_col and group_col in data.columns:
+        if enable_by_group and group_col and group_col in data.columns:
             group_dir = os.path.join(out_dir, "by_group") if not compute_stats_only else None
             if group_dir:
                 os.makedirs(group_dir, exist_ok=True)
+
             result["stats"]["by_group"] = {}
             result["paths"]["by_group"] = {}
+
+            print(f"\n{'=' * 50}")
+            print(f"[分规格分析] 开始处理分组数据")
+            print(f"{'=' * 50}")
 
             vc = data[group_col].value_counts()
             if target_groups is not None:
@@ -251,6 +272,11 @@ class SurfaceEDAAnalyzer:
                 )
                 if g_save:
                     result["paths"]["by_group"][g] = g_save
+            print(f"[分规格分析] 完成")
+        elif enable_by_group and not group_col:
+            print(f"\n[分规格分析] 已跳过 (未指定 group_col)")
+        else:
+            print(f"\n[分规格分析] 已跳过 (enable_by_group=False)")
 
         # ---------- 6. train / test 分布对比 ----------
         if (
@@ -310,6 +336,14 @@ class SurfaceEDAAnalyzer:
             print(f"\n[完成] 所有图表与统计已保存至: {out_dir}")
         else:
             print(f"\n[完成] 仅计算统计（未画图）")
+
+        # 打印本次执行摘要
+        print(f"\n{'=' * 50}")
+        print(f"[执行摘要]")
+        print(f"  - 整体分析: {'✅ 已执行' if enable_overall else '⏭️ 已跳过'}")
+        print(f"  - 分组分析: {'✅ 已执行' if (enable_by_group and group_col) else '⏭️ 已跳过'}")
+        print(f"  - 样本总数: {len(data)}")
+        print(f"{'=' * 50}")
         return result
 
     # ------------------------------------------------------------------
@@ -787,8 +821,142 @@ class SurfaceEDAAnalyzer:
         )
 
 
+
+
+def get_feature_cols(surface: str) -> List[str]:
+    """获取默认特征列（与主流程保持一致）"""
+    prefix = "Top" if surface == "Top" else "Bot"
+    return [
+        f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg",
+        f'{prefix}_Weight_Deviation',
+        f"{prefix}_Current_Sum",
+        f"{prefix}_Current_Per_Speed",
+        f"{prefix}_Theoretical_Factor",
+        "Speed[m/min]_Process_Avg",
+        "Dimension_[mm]_Width",
+        "Dimension_[mm]_Thickness",
+        "Steel_Grade_Encoded",
+    ]
+
+# ==========================================
+# 独立的全量 EDA 分析入口（供主流程调用）
+# ==========================================
+def run_global_eda(
+        df: pd.DataFrame,
+        surface_list: Optional[List[str]] = None,
+        group_col: str = "Setpoint_Group_Label",
+        target_groups: Optional[List[str]] = None,
+        min_samples: int = 200,
+        save_root: str = "result/eda_analysis",
+        time_col: str = "Produce Time",
+        max_groups: int = 20,
+        feature_cols_override: Optional[Dict[str, List[str]]] = None,
+        enable_overall: bool = True,
+        enable_by_group: bool = True,
+        plot_train_test: bool = False,
+        plot_model_residual: bool = False,
+) -> Dict[str, Any]:
+    """
+    对全量数据做训练前的 EDA 分析（支持多表面、分规格组）
+
+    Parameters
+    ----------
+    df : 输入 DataFrame（原始数据，函数内部会 copy）
+    surface_list : ['Top', 'Bot'] 或 ['Top'] 或 ['Bot']，默认 ['Top', 'Bot']
+    group_col : 分组列名，默认 'Setpoint_Group_Label'
+    target_groups : 要分析的白名单规格组，None 表示自动筛选达标组
+    min_samples : 达标组最小样本阈值
+    save_root : 保存根目录（每个 surface 会创建子目录）
+    time_col : 时间列名
+    max_groups : 分规格分析时最多展示多少组
+    feature_cols_override : 自定义特征列，例如 {"Top": [...], "Bot": [...]}
+    enable_overall : 是否做整体分析
+    enable_by_group : 是否做分组分析
+    plot_train_test / plot_model_residual : 关闭不需要的绘图
+
+    Returns
+    -------
+    dict : 每个 surface 的分析结果
+    """
+    if surface_list is None:
+        surface_list = ["Top", "Bot"]
+
+    results = {}
+
+    for surface in surface_list:
+        print(f"\n{'=' * 60}")
+        print(f"[全量 EDA] 开始处理表面: {surface}")
+        print(f"{'=' * 60}")
+
+        # 1. 拷贝数据并衍生特征
+        work = df.copy()
+        prefix = "Top" if surface == "Top" else "Bot"
+        speed_col = "Speed[m/min]_Process_Avg"
+        current_col = f"{prefix}_Current_Sum"
+        per_speed = f"{prefix}_Current_Per_Speed"
+        weight_deviation = f"{prefix}_Weight_Deviation"
+        online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+        setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+
+
+        # 衍生 Current_Per_Speed
+        if current_col in work.columns and speed_col in work.columns:
+            if per_speed not in work.columns:
+                work[per_speed] = work[current_col] / (work[speed_col] + 1e-5)
+
+        # 衍生 Weight_Deviation
+        if online_col in work.columns and setpoint_weight in work.columns:
+            if weight_deviation not in work.columns:
+                work[weight_deviation] = work[setpoint_weight] - work[online_col]
+
+        # 2. 确定特征列
+        if feature_cols_override and surface in feature_cols_override:
+            feature_cols = feature_cols_override[surface]
+        else:
+            # 使用默认特征
+            feature_cols = get_feature_cols(surface)  # 需要从外部导入或复制定义
+
+        # 3. 确定 target_groups（自动筛选达标组）
+        if target_groups is None:
+            if group_col in work.columns:
+                group_sizes = work.groupby(group_col).size()
+                target_groups = group_sizes[group_sizes >= min_samples].index.tolist()
+                print(f"[全量 EDA] 自动筛选达标组: {len(target_groups)} 个")
+            else:
+                target_groups = None
+
+        # 4. 创建 EDA 分析器并运行
+        save_dir = os.path.join(save_root, surface)
+        eda = SurfaceEDAAnalyzer(default_save_dir=save_dir)
+
+        result = eda.analyze(
+            df=work,
+            surface=surface,
+            feature_cols=feature_cols,
+            group_col=group_col if enable_by_group else None,
+            target_groups=target_groups,
+            time_col=time_col,
+            plot_train_test=plot_train_test,
+            plot_model_residual=plot_model_residual,
+            max_groups=max_groups,
+            enable_overall=enable_overall,
+            enable_by_group=enable_by_group,
+        )
+
+        results[surface] = result
+        print(f"[全量 EDA] {surface} 完成，结果保存至: {save_dir}")
+
+    return results
+
+
+
+
 # ----------------------------------------------------------------------
 # 简单使用示例
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    print("SurfaceEDAAnalyzer 已加载。典型调用方式见模块文档字符串与 coating_model_by_group 集成说明。")
+    if __name__ == "__main__":
+        print("SurfaceEDAAnalyzer 已加载。")
+        # 测试代码(对全量数据做 EDA 分析)
+        cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+        run_global_eda(df=cleaned_df,save_root="result/eda_analysis")

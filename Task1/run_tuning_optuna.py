@@ -11,7 +11,6 @@ from optuna.visualization import (
 from coating_model_by_group import (
     build_setpoint_group_key, fit_and_evaluate_surface
 )
-from data_cleaner import SteelDataCleaner
 
 # 基础结果目录
 BASE_RESULT_DIR = "result/tuning"

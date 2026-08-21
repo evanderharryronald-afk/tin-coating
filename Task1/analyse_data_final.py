@@ -793,9 +793,64 @@ if __name__ == "__main__":
         "quantile": 0.35,  # 适度修正分位数
     }
 
+    top_params_mae = {
+        "damping": 0.012711601,
+        "pos_boost": 2.416570967,
+        "alpha_smoothing": 0.952114681,
+
+        "learning_rate": 0.049542607,  # Optuna optimized
+        "max_iter": 400,  # Optuna optimized
+        "max_depth": 6,  # Optuna optimized
+
+        "loss": "absolute_error",
+    }
+
+    bot_params_mae = {
+        "damping": 0.00873119,
+        "pos_boost": 1.664333273,
+        "alpha_smoothing": 0.540325425,
+
+        "learning_rate": 0.049261071,  # Optuna optimized
+        "max_iter": 100,  # Optuna optimized
+        "max_depth": 8,  # Optuna optimized
+
+        "loss": "absolute_error",
+    }
+
+    top_params_mse = {
+        "damping": 0.014615,
+        "pos_boost": 5.065128,
+        "alpha_smoothing": 0.665471,
+
+        "learning_rate": 0.18552,  # Optuna optimized
+        "max_iter": 150,  # Optuna optimized
+        "max_depth": 4,  # Optuna optimized
+
+        "loss": "squared_error",
+    }
+
+    bot_params_mse = {
+        "damping": 0.47218,
+        "pos_boost": 1.462926,
+        "alpha_smoothing": 0.719856,
+
+        "learning_rate": 0.086567,  # Optuna optimized
+        "max_iter": 400,  # Optuna optimized
+        "max_depth": 5,  # Optuna optimized
+
+        "loss": "squared_error",
+    }
+
+
     # 【改动】接收 run_surface_pipeline 的第二个返回值（surface_report）
     top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_optimized)
-    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params_optimized)
+    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+
+    # top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_mae)
+    # bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params_mae)
+
+    # top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_mse)
+    # bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params_mse)
 
     # 【新增】统一导出多sheet Excel + 长格式CSV
     export_reports_to_excel([top_report, bot_report])

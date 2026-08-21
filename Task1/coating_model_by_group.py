@@ -255,6 +255,8 @@ class ResidualCorrectionModel:
             learning_rate=self.learning_rate,
             max_depth=self.max_depth,
             loss='absolute_error',
+            # loss='squared_error',
+            # loss='quantile',  # 使用分位数损失函数，减少异常值影响
             monotonic_cst=monotonic_cst,
             random_state=42
         )

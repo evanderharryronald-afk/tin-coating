@@ -98,7 +98,7 @@ class SurfaceCorrelationAnalyzer:
 
         actual_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
         lab_col = f'{surface_cn}表面镀层重量A(XA1_0)'
-        residual_col=f'{prefix}_Residual'
+        delta_col=f'{prefix}_Residual'
         # setpoint_col=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Min'
         setpoint_col = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
 
@@ -108,13 +108,13 @@ class SurfaceCorrelationAnalyzer:
 
 
         df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
-        df[f'{prefix}_Residual'] = df[lab_col] - df[actual_col]  # 计算残差
+        df[f'{prefix}_Residual'] = df[lab_col] - df[actual_col]  # 计算测量误差
         df[f'{prefix}_Deviation'] = df[setpoint_col] - df[actual_col] # 计算偏差
 
         df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
 
         cols_to_check = [
-            residual_col,
+            delta_col,
             actual_col,
             f'{prefix}_Deviation',
             f'{prefix}_Current_Sum',
@@ -150,18 +150,18 @@ class SurfaceCorrelationAnalyzer:
         for method in methods:
             corr_matrix = data.corr(method=method)
 
-            # ---------- 按与残差的相关性绝对值排序 ----------
-            residual_col = f'{prefix}_Residual'
-            if residual_col in corr_matrix.columns:
-                # 按与残差的 |corr| 降序
-                order = corr_matrix[residual_col].abs().sort_values(ascending=False).index.tolist()
+            # ---------- 按与测量误差的相关性绝对值排序 ----------
+            delta_col = f'{prefix}_Residual'
+            if delta_col in corr_matrix.columns:
+                # 按与测量误差的 |corr| 降序
+                order = corr_matrix[delta_col].abs().sort_values(ascending=False).index.tolist()
                 corr_matrix = corr_matrix.loc[order, order]
             # ---------------------------------------------
 
             result[f'corr_{method}'] = corr_matrix
 
-            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵（按残差|corr|排序）】 ========")
-            print(corr_matrix[residual_col].sort_values(ascending=False))
+            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵（按测量误差|corr|排序）】 ========")
+            print(corr_matrix[delta_col].sort_values(ascending=False))
 
             plt.figure(figsize=(10, 8))
             sns.heatmap(
@@ -173,7 +173,7 @@ class SurfaceCorrelationAnalyzer:
                 vmax=1,
                 square=True
             )
-            plt.title(f'{surface_cn}表面参数与残差 {method.upper()} 相关性热力图（按|corr|排序）')
+            plt.title(f'{surface_cn}表面参数与测量误差 {method.upper()} 相关性热力图（按|corr|排序）')
             plt.tight_layout()
 
             save_img_path = os.path.join(out_dir, f"correlation_{surface}_{method}.png")
@@ -182,15 +182,15 @@ class SurfaceCorrelationAnalyzer:
             print(f"[图表保存] {save_img_path}")
 
         # ====================== 2. Mutual Information ======================
-        residual_col = f'{prefix}_Residual'
+        delta_col = f'{prefix}_Residual'
 
-        if compute_mi and residual_col in data.columns:
-            feature_cols = [c for c in existing_cols if c != residual_col]
+        if compute_mi and delta_col in data.columns:
+            feature_cols = [c for c in existing_cols if c != delta_col]
             if not feature_cols:
                 print("没有可用于 Mutual Information 的特征列。")
             else:
                 X = data[feature_cols]
-                y = data[residual_col]  # 目标改为残差
+                y = data[delta_col]  # 目标改为测量误差
 
                 mi_scores = mutual_info_regression(
                     X, y,
@@ -199,13 +199,13 @@ class SurfaceCorrelationAnalyzer:
                 mi_series = pd.Series(mi_scores, index=feature_cols).sort_values(ascending=False)
                 result['mi'] = mi_series
 
-                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：残差）】 ========")
+                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：测量误差）】 ========")
                 print(mi_series)
 
                 plt.figure(figsize=(8, max(4, len(mi_series) * 0.4)))
                 mi_series.sort_values().plot(kind='barh', color='steelblue')
                 plt.xlabel('Mutual Information')
-                plt.title(f'{surface_cn}表面特征对残差的 Mutual Information')
+                plt.title(f'{surface_cn}表面特征对测量误差的 Mutual Information')
                 plt.tight_layout()
 
                 save_mi_path = os.path.join(out_dir, f"mi_importance_{surface}.png")
@@ -214,7 +214,7 @@ class SurfaceCorrelationAnalyzer:
                 print(f"[图表保存] Mutual Information 重要性图已保存至: {save_mi_path}")
 
         # ====================== 全变量 Mutual Information 矩阵 ======================
-        if compute_mi_matrix and residual_col in data.columns:
+        if compute_mi_matrix and delta_col in data.columns:
             cols = existing_cols
             n = len(cols)
             mi_matrix = pd.DataFrame(np.zeros((n, n)), index=cols, columns=cols)
@@ -232,14 +232,14 @@ class SurfaceCorrelationAnalyzer:
             for col in mi_matrix.columns:
                 mi_matrix.loc[col, col] = 0.0
 
-            # ---------- 按与残差的 MI 值排序（残差固定第一位） ----------
-            if residual_col in mi_matrix.columns:
-                # 先取出与残差的 MI，排除自己
-                mi_with_residual = mi_matrix[residual_col].drop(residual_col)
+            # ---------- 按与测量误差的 MI 值排序（测量误差固定第一位） ----------
+            if delta_col in mi_matrix.columns:
+                # 先取出与测量误差的 MI，排除自己
+                mi_with_delta = mi_matrix[delta_col].drop(delta_col)
                 # 按绝对值从大到小排序
-                other_order = mi_with_residual.abs().sort_values(ascending=False).index.tolist()
-                # 残差放第一位，后面跟排序后的其他变量
-                order = [residual_col] + other_order
+                other_order = mi_with_delta.abs().sort_values(ascending=False).index.tolist()
+                # 测量误差放第一位，后面跟排序后的其他变量
+                order = [delta_col] + other_order
                 mi_matrix = mi_matrix.loc[order, order]
 
             result['mi_matrix'] = mi_matrix
@@ -254,10 +254,10 @@ class SurfaceCorrelationAnalyzer:
             print(f"[图表保存] {save_path}")
 
         # ====================== 3. 距离相关性 (Distance Correlation) ======================
-        if compute_dcor and residual_col in data.columns:
-            feature_cols = [c for c in existing_cols if c != residual_col]
+        if compute_dcor and delta_col in data.columns:
+            feature_cols = [c for c in existing_cols if c != delta_col]
             dcor_scores = {}
-            y = data[residual_col].values.astype(float)
+            y = data[delta_col].values.astype(float)
 
             for col in feature_cols:
                 x = data[col].values.astype(float)
@@ -270,13 +270,13 @@ class SurfaceCorrelationAnalyzer:
             dcor_series = pd.Series(dcor_scores).sort_values(ascending=False)
             result['dcor'] = dcor_series
 
-            print(f"\n======== 【{surface_cn}表面 距离相关性（目标：残差）】 ========")
+            print(f"\n======== 【{surface_cn}表面 距离相关性（目标：测量误差）】 ========")
             print(dcor_series)
 
             plt.figure(figsize=(8, max(4, len(dcor_series) * 0.4)))
             dcor_series.sort_values().plot(kind='barh', color='darkorange')
             plt.xlabel('Distance Correlation')
-            plt.title(f'{surface_cn}表面特征对残差的距离相关性')
+            plt.title(f'{surface_cn}表面特征对测量误差的距离相关性')
             plt.tight_layout()
 
             save_dcor_path = os.path.join(out_dir, f"dcor_importance_{surface}.png")
@@ -285,7 +285,7 @@ class SurfaceCorrelationAnalyzer:
             print(f"[图表保存] {save_dcor_path}")
 
         # ====================== 全变量距离相关性矩阵 ======================
-        if compute_dcor_matrix and residual_col in data.columns:
+        if compute_dcor_matrix and delta_col in data.columns:
             cols = existing_cols
             n = len(cols)
             dcor_matrix = pd.DataFrame(np.zeros((n, n)), index=cols, columns=cols)
@@ -303,9 +303,9 @@ class SurfaceCorrelationAnalyzer:
                             dcor_matrix.iloc[i, j] = val
                             dcor_matrix.iloc[j, i] = val
 
-            #  dcor_matrix 按照对残差的距离相关性绝对值排序
-            if residual_col in dcor_matrix.columns:
-                order = dcor_matrix[residual_col].abs().sort_values(ascending=False).index.tolist()
+            #  dcor_matrix 按照对测量误差的距离相关性绝对值排序
+            if delta_col in dcor_matrix.columns:
+                order = dcor_matrix[delta_col].abs().sort_values(ascending=False).index.tolist()
                 dcor_matrix = dcor_matrix.loc[order, order]
 
             result['dcor_matrix'] = dcor_matrix

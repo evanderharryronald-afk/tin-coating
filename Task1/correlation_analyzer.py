@@ -321,9 +321,13 @@ class SurfaceCorrelationAnalyzer:
         return result
 
 if __name__ == "__main__":
-    # 读取清洗后的数据
-    cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+    # # 读取清洗后的数据
+    # cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+    # analyzer = SurfaceCorrelationAnalyzer(default_save_dir="result/correlation_result")
+
+    featured_df = pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
     analyzer = SurfaceCorrelationAnalyzer(default_save_dir="result/correlation_result")
+
 
     # 分表面整体分析
     for surface in ['Top', 'Bot']:
@@ -331,7 +335,7 @@ if __name__ == "__main__":
         print(f"开始分析 {surface} 表面")
         print("=" * 60)
         analyzer.analyze_surface(
-            cleaned_df,
+            featured_df,
             surface=surface,
             extra_cols=None,
             save_dir="result/correlation_result",

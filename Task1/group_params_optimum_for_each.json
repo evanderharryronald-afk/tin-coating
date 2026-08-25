@@ -12,7 +12,7 @@
   ],
   "min_group_samples": 200,
   "data_paths": {
-    "clean_data": "result/cleaned_data/cleaned_data.xlsx",
+    "clean_data": "result/data/feature_engineered_data/featured_data.xlsx",
     "report_output": "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
   },
   "default_params": {

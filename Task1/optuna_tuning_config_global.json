@@ -1,6 +1,6 @@
 {
   "mode": "global",
-  "data_path": "result/cleaned_data/cleaned_data.xlsx",
+  "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
   "min_samples": 200,
   "n_trials": 50,
   "groups": null

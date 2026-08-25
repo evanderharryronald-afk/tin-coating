@@ -12,7 +12,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
-os.makedirs("result/cleaned_data", exist_ok=True)
+os.makedirs("result/data/cleaned_data", exist_ok=True)
 os.makedirs("result/correlation_result", exist_ok=True)
 os.makedirs("result/fitting_result", exist_ok=True)
 os.makedirs("result/models", exist_ok=True)
@@ -475,12 +475,12 @@ def run_surface_pipeline(df, surface='Top', grade_freq_map=None,
 # 5. 主流程
 # ==========================================
 if __name__ == "__main__":
-    raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+    raw_df = pd.read_excel("result/data/merged_data/merged_result_latest.xlsx")
 
     clean_df, grade_freq_map = preprocess_and_filter_outliers(
         raw_df,
-        clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-        filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
+        clean_save_path="result/data/cleaned_data/cleaned_data.xlsx",
+        filtered_save_path="result/data/cleaned_data/filtered_outliers.xlsx"
     )
 
     check_residual_distribution(clean_df)

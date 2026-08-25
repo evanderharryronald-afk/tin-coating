@@ -15,7 +15,7 @@ import seaborn as sns
 from scipy import stats
 
 # ====================== 配置区 ======================
-CLEAN_DATA_PATH = "result/cleaned_data/cleaned_data.xlsx"
+CLEAN_DATA_PATH = "result/data/cleaned_data/cleaned_data.xlsx"
 OUTPUT_DIR = "result/drift_diagnosis/grouped_drift_analysis"
 MIN_SAMPLES = 200          # 组内至少这么多点才做分析
 WINDOW_SIZE = 50           # 滑动窗口大小（可按数据量调整 50~120）

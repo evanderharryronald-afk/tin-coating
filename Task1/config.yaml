@@ -129,5 +129,5 @@ sub_tables:
 
 # ── 输出配置 ────────────────────────────────────────────────────
 output:
-  path: 'result/merged_data/merged_result_latest.xlsx'    # 输出文件路径
+  path: 'result/data/merged_data/merged_result_latest.xlsx'    # 输出文件路径
   sheet_name: "Result"          # 输出 Sheet 名称

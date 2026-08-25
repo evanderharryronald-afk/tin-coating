@@ -270,5 +270,5 @@ def run_grouped_low_reading_analysis(df, min_samples_desc=10):
 
 
 if __name__ == "__main__":
-    clean_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
-    run_grouped_low_reading_analysis(clean_df, min_samples_desc=200)
+    featured_df = pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
+    run_grouped_low_reading_analysis(featured_df, min_samples_desc=200)

@@ -14,7 +14,7 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 创建结果保存目录结构
-os.makedirs("result/cleaned_data", exist_ok=True)
+os.makedirs("result/data/cleaned_data", exist_ok=True)
 os.makedirs("result/correlation_result", exist_ok=True)
 os.makedirs("result/fitting_result", exist_ok=True)
 

@@ -318,36 +318,84 @@ def feature_relationship_diagnostics(
 # ==========================================
 # 4. 时序自相关诊断（数据需按时间/顺序排列）
 # ==========================================
-def temporal_diagnostics(residuals: pd.Series, label: str, save_dir: str, tag: str = "", n_lags=40):
+# ==========================================
+# 4. 时序自相关诊断（数据需按时间/顺序排列）
+# ==========================================
+def temporal_diagnostics(
+        residuals: pd.Series,
+        label: str,
+        save_dir: str,
+        tag: str = "",
+        n_lags=40,
+        time_series: pd.Series = None,
+        window_size: int = 160
+):
     """
-    残差自相关性检验。仅当数据按时间/工艺顺序排列时才有意义
-    （比如按 coil 生产顺序排的测试集，不要在随机 shuffle 过的数据上跑这个）。
+    残差时序诊断：
+    - 残差 vs 时间/顺序散点图 + Rolling Mean 滑动平均线（捕捉低频漂移）
+    - 残差自相关性 (ACF) + Ljung-Box 检验
+
+    time_series: 可选，对应的时间戳序列（pd.Series）。如果不传，默认按索引顺序（Index/Sequence Order）绘图。
+    window_size: 计算 Rolling Mean 的窗口大小，默认 160。
     """
     if not HAS_STATSMODELS:
         print("[时序诊断] 未安装 statsmodels，跳过自相关分析（pip install statsmodels 后可用）。")
         return None
 
     _safe_makedirs(save_dir)
-    residuals = pd.Series(residuals).dropna().reset_index(drop=True)
+    residuals = pd.Series(residuals).dropna()
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    plot_acf(residuals, ax=ax, lags=min(n_lags, len(residuals) // 2 - 1))
-    ax.set_title(f'{label} 残差自相关函数 (ACF)')
+    # 获取 X 轴坐标（优先使用传入的时间序列，没有则使用 index/顺序）
+    if time_series is not None:
+        x_axis = pd.to_datetime(time_series.reindex(residuals.index))
+        x_label = "时间"
+    else:
+        x_axis = np.arange(len(residuals))
+        x_label = "样本顺序 (Index)"
+
+    # 计算滑动平均线（Rolling Mean）
+    # min_periods=1 保证即使样本数不足 window_size 也能算出来
+    roll_mean = residuals.rolling(window=window_size, min_periods=1).mean()
+
+    # 绘制 2x1 子图：上图为残差随时间变化，下图为 ACF 自相关图
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+
+    # --- 1. 残差 vs 时间 / 顺序分布图 ---
+    axes[0].scatter(x_axis, residuals, s=8, alpha=0.3, color='steelblue', label='残差样本点')
+    axes[0].plot(x_axis, roll_mean, color='red', linewidth=2, label=f'滑动平均 (w={window_size})')
+    axes[0].axhline(0, color='black', linestyle='--', linewidth=1)
+    axes[0].set_title(f'{label} 残差随{x_label}变化趋势')
+    axes[0].set_xlabel(x_label)
+    axes[0].set_ylabel('残差')
+    axes[0].legend(loc='upper right')
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+
+    if time_series is not None:
+        fig.autofmt_xdate()  # 如果是时间类型，自动旋转 X 轴日期标签
+
+    # --- 2. ACF 自相关图 ---
+    plot_acf(residuals.reset_index(drop=True), ax=axes[1], lags=min(n_lags, len(residuals) // 2 - 1))
+    axes[1].set_title(f'{label} 残差自相关函数 (ACF)')
+    axes[1].grid(True, linestyle=':', alpha=0.6)
+
     plt.tight_layout()
-    img_path = f"{save_dir}/residual_acf_{tag}.png"
+    img_path = f"{save_dir}/residual_temporal_{tag}.png"
     plt.savefig(img_path, dpi=300)
     plt.close()
 
+    # Ljung-Box 自相关检验
     lb_result = acorr_ljungbox(residuals, lags=[min(10, len(residuals) // 3)], return_df=True)
     lb_stat = lb_result['lb_stat'].iloc[0]
     lb_p = lb_result['lb_pvalue'].iloc[0]
 
     summary = {
+        '残差时序漂移最大幅值(Rolling Max)': roll_mean.max(),
+        '残差时序漂移最小幅值(Rolling Min)': roll_mean.min(),
         'Ljung-Box统计量': lb_stat,
         'Ljung-Box_p值': lb_p,
         '是否存在显著自相关(p<0.05)': lb_p < 0.05,
     }
-    print(f"[时序诊断] {label} ACF图已保存至: {img_path}")
+    print(f"[时序诊断] {label} 时序趋势图与 ACF 图已保存至: {img_path}")
     if lb_p < 0.05:
         print("  -> p < 0.05，残差存在显著自相关，说明可能有时序结构（滞后特征/设备漂移等）未被模型捕捉")
     return summary
@@ -407,6 +455,8 @@ def run_full_residual_diagnostics(
     n_bins=8, categorical_features=None,
     run_temporal=True, run_explainability=True,
     top_n_features=None,
+    time_col=None,  # <--- 【新增参数】可以是列名字符串（如 "Produce Time"），也可以是独立的 pd.Series
+    rolling_window=160, # <--- 【新增参数】控制 Rolling Mean 窗口大小
 ):
     """
     一次性跑完 1~5 全部诊断子模块，返回结构化结果字典，
@@ -419,6 +469,7 @@ def run_full_residual_diagnostics(
       run_explainability: 是否跑二次建模评分（数据量较大时会慢一些）
       top_n_features: 只分析前 N 个特征（特征很多时用于控制画图数量）
     """
+
     y_true_train = pd.Series(y_true_train)
     y_true_test = pd.Series(y_true_test)
     pred_train = pd.Series(pred_train, index=y_true_train.index) if not isinstance(pred_train, pd.Series) else pred_train
@@ -445,12 +496,21 @@ def run_full_residual_diagnostics(
         n_bins=n_bins, categorical_features=categorical_features,
         top_n_features=top_n_features,
     )
+    # 提取时间序列 (如果是列名，从 X_test 中取；如果是 Series，直接使用)
+    time_series_test = None
+    if time_col is not None:
+        if isinstance(time_col, str) and time_col in X_test.columns:
+            time_series_test = X_test[time_col]
+        elif isinstance(time_col, pd.Series):
+            time_series_test = time_col
 
     temporal_summary = None
     if run_temporal:
         temporal_summary = temporal_diagnostics(
             residuals_test, label=f"{label}(测试集)",
-            save_dir=f"{save_dir}/temporal", tag=tag
+            save_dir=f"{save_dir}/temporal", tag=tag,
+            time_series=time_series_test,
+            window_size=rolling_window
         )
 
     explain_summary = None

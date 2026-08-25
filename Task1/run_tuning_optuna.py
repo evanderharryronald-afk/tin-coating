@@ -19,7 +19,7 @@ BASE_RESULT_DIR = "result/tuning"
 def load_config(config_path):
     """加载 JSON 配置文件，支持默认兜底"""
     default_config = {
-        "data_path": "result/cleaned_data/cleaned_data.xlsx",
+        "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
         "min_samples": 200,
         "n_trials": 40,
         "groups": None,

@@ -25,7 +25,7 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 创建结果保存目录结构
-os.makedirs("result/cleaned_data", exist_ok=True)
+os.makedirs("result/data/cleaned_data", exist_ok=True)
 os.makedirs("result/correlation_result", exist_ok=True)
 os.makedirs("result/fitting_result", exist_ok=True)
 
@@ -341,6 +341,11 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         save_dir="result/fitting_result/residual_diagnosis",
     )
 
+    # 1. 抽取测试集对应的时间列（按测试集 Index 切片）
+    time_col = 'Produce Time' if 'Produce Time' in df.columns else None
+    df_time_test = df.loc[X_test.index, time_col] if time_col else None
+
+
     # 【新增】完整版残差诊断
     full_diag = run_full_residual_diagnostics(
         y_true_train=y_true_train, y_true_test=y_true_test,
@@ -350,7 +355,9 @@ def run_surface_pipeline(df, surface='Top', params=None, **kwargs):
         save_dir=f"result/fitting_result/residual_diagnosis_full/{surface}",
         tag=surface,
         categorical_features=['Steel_Grade_Encoded'],  # 显式指定，避免被当成数值特征分箱
-        run_temporal=True,  # 你这里 train_test_split(shuffle=False)，测试集保持时间顺序，可以跑
+        run_temporal=True,  # 这里 train_test_split(shuffle=False)，测试集保持时间顺序，可以跑
+        time_col=df_time_test,  # <--- 传入时间数据列，使时间趋势分析生效
+        rolling_window=100,  # <--- 控制 Rolling Mean 窗口大小
         run_explainability=True,
     )
 
@@ -647,6 +654,10 @@ def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_r
                                  ignore_index=True)
     feature_sig_all = pd.concat([_tag_surface(r['residual_feature_significance'], r['surface_cn']) for r in reports],
                                 ignore_index=True)
+    # 拼接按时间/分箱的异方差表
+    hetero_bins_all = pd.concat([_tag_surface(r['residual_hetero_bins_full'], r['surface_cn']) for r in reports],
+                                ignore_index=True)
+
 
     # 参数配置表（每次跑用的超参数，方便追溯是哪次实验的结果）
     params_rows = []
@@ -687,6 +698,7 @@ def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_r
         outliers_all.to_excel(writer, sheet_name='离群点明细', index=False)
         full_summary_all.to_excel(writer, sheet_name='残差诊断完整版汇总', index=False)
         feature_sig_all.to_excel(writer, sheet_name='残差特征显著性排序', index=False)
+        hetero_bins_all.to_excel(writer, sheet_name='残差时间与预测值分箱', index=False)
 
     print(f"\n[汇总导出] 多sheet Excel 报告已保存至: {excel_path}")
 
@@ -713,7 +725,7 @@ def export_reports_to_excel(reports, excel_path="result/fitting_result/summary_r
 # 5. 主流程
 # ==========================================
 if __name__ == "__main__":
-    # raw_df = pd.read_excel("result/merged_data/merged_result_latest.xlsx")
+    # raw_df = pd.read_excel("result/data/merged_data/merged_result_latest.xlsx")
     #
     # cleaner = SteelDataCleaner(
     #     min_speed=20.0,
@@ -724,11 +736,11 @@ if __name__ == "__main__":
     #
     # clean_df = cleaner.process(
     #     raw_df,
-    #     clean_save_path="result/cleaned_data/cleaned_data.xlsx",
-    #     filtered_save_path="result/cleaned_data/filtered_outliers.xlsx"
+    #     clean_save_path="result/data/cleaned_data/cleaned_data.xlsx",
+    #     filtered_save_path="result/data/cleaned_data/filtered_outliers.xlsx"
     # )
 
-    clean_df=pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
+    featured_df=pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
 
     # -------------------------------------------------------------
     # 方式 A：定义参数字典（推荐，便于对接 JSON 配置文件或 Optuna 调参）
@@ -843,8 +855,8 @@ if __name__ == "__main__":
 
 
     # 【改动】接收 run_surface_pipeline 的第二个返回值（surface_report）
-    top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_optimized)
-    bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params)
+    top_corrector, top_report = run_surface_pipeline(featured_df, surface='Top', params=top_params_optimized)
+    bot_corrector, bot_report = run_surface_pipeline(featured_df, surface='Bot', params=bot_params)
 
     # top_corrector, top_report = run_surface_pipeline(clean_df, surface='Top', params=top_params_mae)
     # bot_corrector, bot_report = run_surface_pipeline(clean_df, surface='Bot', params=bot_params_mae)

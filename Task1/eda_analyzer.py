@@ -1546,5 +1546,5 @@ if __name__ == "__main__":
     if __name__ == "__main__":
         print("SurfaceEDAAnalyzer 已加载。")
         # 测试代码(对全量数据做 EDA 分析)
-        cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
-        run_global_eda(df=cleaned_df,save_root="result/eda_analysis")
+        featured_df=pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
+        run_global_eda(df=featured_df,save_root="result/eda_analysis")

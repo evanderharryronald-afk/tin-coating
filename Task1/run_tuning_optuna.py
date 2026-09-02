@@ -4,6 +4,7 @@ import json
 import argparse
 import pandas as pd
 import optuna
+from optuna.samplers import NSGAIISampler
 from optuna.visualization import (
     plot_pareto_front, plot_param_importances, plot_slice, plot_parallel_coordinate
 )
@@ -103,7 +104,13 @@ def tune_one(group_df, group_label, surface, n_trials, result_subdir):
     tag = f"{group_label}__{surface}"
     print(f"\n===== 开始调参: {tag}, trials={n_trials} =====")
 
-    study = optuna.create_study(directions=["minimize", "minimize"], study_name=tag)
+    #固定随机种子使得结果可复现
+    study = optuna.create_study(
+        directions=["minimize", "minimize"],
+        study_name=tag,
+        sampler=NSGAIISampler(seed=42)  # 多目标优化默认用的是 NSGAIISampler
+    )
+
     study.optimize(
         make_objective(group_df, surface, group_label),
         n_trials=n_trials,
@@ -269,8 +276,11 @@ def run_per_group_tuning(data_path, config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="镀锌模型多规格组 Optuna 自动调参脚本")
-    parser.add_argument("--config", type=str, default="optuna_tuning_config_global.json",
-                        help="配置文件路径 (默认: optuna_tuning_config_global.json)")
+    # parser.add_argument("--config", type=str, default="optuna_tuning_config_global.json",
+    #                     help="配置文件路径 (默认: optuna_tuning_config_global.json)")
+
+    parser.add_argument("--config", type=str, default="optuna_tuning_config_grouped.json",
+                        help="配置文件路径 (默认: optuna_tuning_config_grouped.json)")
     args = parser.parse_args()
 
     # 1. 加载 JSON 配置

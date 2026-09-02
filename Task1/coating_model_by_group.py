@@ -330,6 +330,10 @@ def _compute_directional_metrics(residuals):
     
     pos_mae = residuals[mask_pos].abs().mean() if pos_count > 0 else 0.0
     neg_mae = residuals[mask_neg].abs().mean() if neg_count > 0 else 0.0
+
+    pos_rmse = np.sqrt((residuals[mask_pos] ** 2).mean()) if pos_count > 0 else 0.0
+    neg_rmse = np.sqrt((residuals[mask_neg] ** 2).mean()) if neg_count > 0 else 0.0
+
     
     return {
         'mask_pos': mask_pos,
@@ -338,6 +342,8 @@ def _compute_directional_metrics(residuals):
         'neg_count': neg_count,
         'pos_mae': pos_mae,
         'neg_mae': neg_mae,
+        'pos_rmse': pos_rmse,
+        'neg_rmse': neg_rmse,
     }
 
 
@@ -402,16 +408,14 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     speed_col = 'Speed[m/min]_Process_Avg'
     current_col = f'{prefix}_Current_Sum'
     online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
-    # setpoint_weight=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Min'
-    setpoint_weight=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+    setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
 
     df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
-    df[f'{prefix}_Weight_Deviation'] = df[setpoint_weight]-df[online_col]
+    df[f'{prefix}_Weight_Deviation'] = df[setpoint_weight] - df[online_col]
 
     feature_cols = [
         online_col,
         current_col,
-        # f'{prefix}_Weight_Deviation',
         f'{prefix}_Current_Per_Speed',
         f'{prefix}_Theoretical_Factor',
         speed_col,
@@ -428,33 +432,21 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
 
     n_samples = len(X)
 
-    USE_LINEAR_MODEL = False # 想切回树模型时改这里
-    # USE_LINEAR_MODEL = True
+    USE_LINEAR_MODEL = False  # 想切回树模型时改这里
     ModelClass = LinearResidualCorrectionModel if USE_LINEAR_MODEL else ResidualCorrectionModel
 
     if n_samples < 50:
-        # 样本太少，强制退回固定切分，避免窗口逻辑出错
         use_expanding_window = False
+
     # ------------------------------------------------------------------
     # 分支 1：原来的固定 8:2 时间切分
     # ------------------------------------------------------------------
     if not use_expanding_window:
         X_train, X_test, y_delta_train, y_delta_test, actual_train, actual_test, y_true_train, y_true_test = \
             train_test_split(X, y_delta, online_actual, y_true_full, test_size=0.2, shuffle=False)
-        
+
         corrector = _build_corrector_instance(params, ModelClass)
         corrector.fit(X_train, y_delta_train)
-
-        # corrector = ResidualCorrectionModel(
-        #     monotonic_feature_idx=None,
-        #     alpha_smoothing=params["alpha_smoothing"],
-        #     pos_boost=params["pos_boost"],
-        #     damping=params["damping"],
-        #     max_iter=params["max_iter"],
-        #     learning_rate=params["learning_rate"],
-        #     max_depth=params["max_depth"],
-        # )
-        # corrector.fit(X_train, y_delta_train)
 
         # 测试集预测
         pred_series, _ = corrector.predict_smooth(X_test, actual_test)
@@ -473,7 +465,6 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     # 分支 2：扩展窗口（Expanding Window）
     # ------------------------------------------------------------------
     else:
-        # 按时间顺序的索引
         indices = np.arange(n_samples)
         min_train_size = int(n_samples * train_ratio)
         remaining = n_samples - min_train_size
@@ -486,8 +477,7 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         for i in range(n_splits):
             train_end = min_train_size + i * step
             if i == n_splits - 1:
-                # 最后一次窗口：用到倒数第二段训练，最后一段测试
-                train_end = n_samples - max(int(n_samples * 0.15), 20)  # 至少留 15% 或 20 条做测试
+                train_end = n_samples - max(int(n_samples * 0.15), 20)
                 test_end = n_samples
             else:
                 test_end = min(train_end + step, n_samples)
@@ -510,17 +500,6 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
             corrector = _build_corrector_instance(params, ModelClass)
             corrector.fit(X_train, y_delta_train)
 
-            # corrector = ResidualCorrectionModel(
-            #     monotonic_feature_idx=None,
-            #     alpha_smoothing=params["alpha_smoothing"],
-            #     pos_boost=params["pos_boost"],
-            #     damping=params["damping"],
-            #     max_iter=params["max_iter"],
-            #     learning_rate=params["learning_rate"],
-            #     max_depth=params["max_depth"],
-            # )
-            # corrector.fit(X_train, y_delta_train)
-
             pred_series, _ = corrector.predict_smooth(X_test, actual_test)
             raw_residuals = y_true_test - actual_test
             model_residuals = y_true_test - pred_series
@@ -529,7 +508,6 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
             raw_residuals_train = y_true_train - actual_train
             model_residuals_train = y_true_train - pred_train
 
-            # 记录本窗口的关键指标（可选，用于后续平均）
             window_mae = model_residuals.abs().mean()
             window_metrics_list.append({
                 'window': i + 1,
@@ -539,7 +517,6 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
                 'mae_online': raw_residuals.abs().mean(),
             })
 
-            # 只保留最后一个窗口的结果作为最终返回
             last_corrector = corrector
             last_aux = dict(
                 X_test=X_test,
@@ -556,7 +533,6 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
             )
 
         if last_corrector is None:
-            # 兜底：窗口全部失败时退回固定切分
             return fit_and_evaluate_surface(df, surface, params, group_tag=group_tag,
                                             use_expanding_window=False)
 
@@ -574,27 +550,66 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         y_true_train = aux_from_window['y_true_train']
         actual_train = aux_from_window['actual_train']
 
-        # 可选：打印各窗口 MAE，方便诊断
         if window_metrics_list:
             print(f"  [扩展窗口] {group_tag}-{surface} 各窗口 MAE: "
                   + ", ".join([f"W{w['window']}={w['mae_model']:.4f}" for w in window_metrics_list]))
 
     # ------------------------------------------------------------------
-    # 统一计算指标（固定切分 和 扩展窗口最后一次 共用）
+    # 统一计算指标（按原始残差的掩码，统一正/负偏差的评价基准）
     # ------------------------------------------------------------------
     overall_mae_model = model_residuals.abs().mean()
     overall_mae_online = raw_residuals.abs().mean()
+    # 1. 全量数据原始残差正负样本数
+    raw_residuals_full = y_true_full - online_actual
+    total_pos_count = int((raw_residuals_full < 0).sum())
+    total_neg_count = int((raw_residuals_full > 0).sum())
 
-    # 使用辅助函数计算正/负偏差指标
-    test_directional_metrics = _compute_directional_metrics(raw_residuals)
-    test_directional_metrics_model = _compute_directional_metrics(model_residuals)
-    
-    mask_pos = test_directional_metrics['mask_pos']
-    mask_neg = test_directional_metrics['mask_neg']
-    pos_mae_online = test_directional_metrics['pos_mae']
-    neg_mae_online = test_directional_metrics['neg_mae']
-    pos_mae_model = test_directional_metrics_model['pos_mae']
-    neg_mae_model = test_directional_metrics_model['neg_mae']
+    # 2. 训练集原始残差正负样本数
+    train_pos_count = int((raw_residuals_train < 0).sum())
+    train_neg_count = int((raw_residuals_train > 0).sum())
+
+
+    # 1. 统一以【原始在线残差】划分正/负偏差样本掩码
+    mask_pos = (raw_residuals < 0)
+    mask_neg = (raw_residuals > 0)
+
+    pos_count = int(mask_pos.sum())
+    neg_count = int(mask_neg.sum())
+
+    # 2. 在【相同掩码】下计算在线与模型的 MAE / RMSE
+    pos_mae_online = raw_residuals[mask_pos].abs().mean() if pos_count > 0 else np.nan
+    pos_mae_model = model_residuals[mask_pos].abs().mean() if pos_count > 0 else np.nan
+    pos_rmse_online = np.sqrt((raw_residuals[mask_pos] ** 2).mean()) if pos_count > 0 else np.nan
+    pos_rmse_model = np.sqrt((model_residuals[mask_pos] ** 2).mean()) if pos_count > 0 else np.nan
+
+    neg_mae_online = raw_residuals[mask_neg].abs().mean() if neg_count > 0 else np.nan
+    neg_mae_model = model_residuals[mask_neg].abs().mean() if neg_count > 0 else np.nan
+    neg_rmse_online = np.sqrt((raw_residuals[mask_neg] ** 2).mean()) if neg_count > 0 else np.nan
+    neg_rmse_model = np.sqrt((model_residuals[mask_neg] ** 2).mean()) if neg_count > 0 else np.nan
+
+    # 3. 计算提升量（无样本时差值自动为 NaN）
+    pos_mae_diff = pos_mae_model - pos_mae_online if pos_count > 0 else np.nan
+    pos_rmse_diff = pos_rmse_model - pos_rmse_online if pos_count > 0 else np.nan
+    neg_mae_diff = neg_mae_model - neg_mae_online if neg_count > 0 else np.nan
+    neg_rmse_diff = neg_rmse_model - neg_rmse_online if neg_count > 0 else np.nan
+
+    # 4. 重新封装适配 aux 的字典，防止报错，并保证兼容性
+    test_directional_metrics_raw = {
+        'pos_count': pos_count,
+        'neg_count': neg_count,
+        'pos_mae': pos_mae_online,
+        'neg_mae': neg_mae_online,
+        'pos_rmse': pos_rmse_online,
+        'neg_rmse': neg_rmse_online,
+    }
+    test_directional_metrics_model = {
+        'pos_count': pos_count,
+        'neg_count': neg_count,
+        'pos_mae': pos_mae_model,
+        'neg_mae': neg_mae_model,
+        'pos_rmse': pos_rmse_model,
+        'neg_rmse': neg_rmse_model,
+    }
 
     r2_online = r2_score(y_true_series, online_series)
     r2_model = r2_score(y_true_series, pred_series)
@@ -619,9 +634,13 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         '表面': surface,
         '训练样本数': len(X_train),
         '测试样本数': len(X_test),
-        '使用扩展窗口': use_expanding_window,   # 新增字段，方便报表区分
+        '正偏差样本数_总': total_pos_count,
+        '负偏差样本数_总': total_neg_count,
+        '使用扩展窗口': use_expanding_window,
 
         # ---- 训练集 ----
+        '正偏差样本数_训练': train_pos_count,
+        '负偏差样本数_训练': train_neg_count,
         'R2_在线_训练': r2_online_train,
         'R2_模型_训练': r2_model_train,
         'R2_提升_训练': r2_model_train - r2_online_train,
@@ -645,14 +664,20 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         '偏差均值_在线_测试': raw_residuals.mean(),
         '偏差均值_模型_测试': model_residuals.mean(),
         '偏差均值_提升_测试': model_residuals.mean() - raw_residuals.mean(),
-        '正偏差样本数_测试': int(mask_pos.sum()),
+        '正偏差样本数_测试': pos_count,
         '正偏差MAE_在线_测试': pos_mae_online,
         '正偏差MAE_模型_测试': pos_mae_model,
-        '正偏差MAE_提升_测试': pos_mae_model - pos_mae_online,
-        '负偏差样本数_测试': int(mask_neg.sum()),
+        '正偏差MAE_提升_测试': pos_mae_diff,
+        '正偏差RMSE_在线_测试': pos_rmse_online,
+        '正偏差RMSE_模型_测试': pos_rmse_model,
+        '正偏差RMSE_提升_测试': pos_rmse_diff,
+        '负偏差样本数_测试': neg_count,
         '负偏差MAE_在线_测试': neg_mae_online,
         '负偏差MAE_模型_测试': neg_mae_model,
-        '负偏差MAE_提升_测试': neg_mae_model - neg_mae_online,
+        '负偏差MAE_提升_测试': neg_mae_diff,
+        '负偏差RMSE_在线_测试': neg_rmse_online,
+        '负偏差RMSE_模型_测试': neg_rmse_model,
+        '负偏差RMSE_提升_测试': neg_rmse_diff,
 
         # ---- 过拟合程度 ----
         '过拟合程度_R2': overfitting_r2,
@@ -671,7 +696,7 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
         model_residuals=model_residuals,
         raw_residuals_train=raw_residuals_train,
         model_residuals_train=model_residuals_train,
-        test_directional_metrics_raw=test_directional_metrics,
+        test_directional_metrics_raw=test_directional_metrics_raw,
         test_directional_metrics_model=test_directional_metrics_model,
     )
     return corrector, metrics, aux
@@ -693,17 +718,17 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     print(f"==========================================")
 
 
-    # 1. 相关性分析
-    save_dir = f"result/grouped_by_coating_weight/correlation_result/correlation_result{safe_tag}"
-    analyzer = SurfaceCorrelationAnalyzer(default_save_dir=save_dir)
-    analyzer.analyze_surface(
-        df, 
-        surface=surface, 
-        extra_cols=None,
-        save_dir=save_dir,
-        corr_method='both',  # 同时输出 Pearson 和 Spearman
-        compute_mi=True      # 计算 Mutual Information
-    )
+    # # 1. 相关性分析
+    # save_dir = f"result/grouped_by_coating_weight/correlation_result/correlation_result{safe_tag}"
+    # analyzer = SurfaceCorrelationAnalyzer(default_save_dir=save_dir)
+    # analyzer.analyze_surface(
+    #     df,
+    #     surface=surface,
+    #     extra_cols=None,
+    #     save_dir=save_dir,
+    #     corr_method='both',  # 同时输出 Pearson 和 Spearman
+    #     compute_mi=True      # 计算 Mutual Information
+    # )
 
     # 2. 纯计算：切分、训练、算指标
     corrector, metrics, aux = fit_and_evaluate_surface(
@@ -725,29 +750,29 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     test_directional_metrics = aux['test_directional_metrics_raw']
     test_directional_metrics_model = aux['test_directional_metrics_model']
 
-    # ========== 训练后 EDA（模型残差） ==========
-    eda_post_dir = f"result/grouped_by_coating_weight/eda_post/{group_tag}_{surface}"
-    eda_post = SurfaceEDAAnalyzer(default_save_dir=eda_post_dir)
-
-    # 方式 A：直接传 residual Series + 特征（推荐，最干净）
-    # 测试集模型残差
-    eda_post.analyze_residual_series(
-        residual=model_residuals,  # True - Model
-        features=X_test,  # 与训练特征一致
-        # time_series=df.loc[X_test.index, "Produce Time"] if "Produce Time" in df.columns else None,
-        train_idx=None,  # 如需 train/test 对比可再传
-        test_idx=None,
-        save_dir=os.path.join(eda_post_dir, "model_residual_test"),
-        title_prefix=f"{tag_display}{surface_cn}模型残差(测试)",
-    )
-
-    # 可选：原始在线残差也跑一遍，方便对比
-    eda_post.analyze_residual_series(
-        residual=raw_residuals,  # True - Online
-        features=X_test,
-        save_dir=os.path.join(eda_post_dir, "raw_residual_test"),
-        title_prefix=f"{tag_display}{surface_cn}原始在线残差(测试)",
-    )
+    # # ========== 训练后 EDA（模型残差） ==========
+    # eda_post_dir = f"result/grouped_by_coating_weight/eda_post/{group_tag}_{surface}"
+    # eda_post = SurfaceEDAAnalyzer(default_save_dir=eda_post_dir)
+    #
+    # # 方式 A：直接传 residual Series + 特征（推荐，最干净）
+    # # 测试集模型残差
+    # eda_post.analyze_residual_series(
+    #     residual=model_residuals,  # True - Model
+    #     features=X_test,  # 与训练特征一致
+    #     # time_series=df.loc[X_test.index, "Produce Time"] if "Produce Time" in df.columns else None,
+    #     train_idx=None,  # 如需 train/test 对比可再传
+    #     test_idx=None,
+    #     save_dir=os.path.join(eda_post_dir, "model_residual_test"),
+    #     title_prefix=f"{tag_display}{surface_cn}模型残差(测试)",
+    # )
+    #
+    # # 可选：原始在线残差也跑一遍，方便对比
+    # eda_post.analyze_residual_series(
+    #     residual=raw_residuals,  # True - Online
+    #     features=X_test,
+    #     save_dir=os.path.join(eda_post_dir, "raw_residual_test"),
+    #     title_prefix=f"{tag_display}{surface_cn}原始在线残差(测试)",
+    # )
 
     # 方式 B：用 analyze + y_true/y_pred（等价）
     # eda_post.analyze(
@@ -915,10 +940,18 @@ if __name__ == "__main__":
     #     "--config", type=str, default="group_params_all_the_same.json",
     #     help="配置文件 JSON 路径 (默认: group_params_all_the_same.json)"
     # )
-    parser.add_argument(
-        "--config", type=str, default="group_params_optimum_for_each.json",  ## 使用Optuna对各组搜索出来的最优的超参数
-        help="配置文件 JSON 路径 (默认: group_params_optimum_for_each.json)"
+    parser.add_argument(                                           ## 所有组都使用同样的超参数，即对Top2.799_Bot2.799最优的超参数
+        "--config", type=str, default="group_params_all_the_same_2.json",
+        help="配置文件 JSON 路径 (默认: group_params_all_the_same_2.json)"
     )
+    # parser.add_argument(
+    #     "--config", type=str, default="group_params_optimum_for_each.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each.json)"
+    # )
+    # parser.add_argument(
+    #     "--config", type=str, default="group_params_optimum_for_each_optimal.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_optimal.json)"
+    # )
     # parser.add_argument(
     #     "--config", type=str, default="group_params_optimum_for_each_reduce_overfitting.json",  ## 降低模型过拟合的超参数配置
     #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_reduce_overfitting.json)"
@@ -932,49 +965,49 @@ if __name__ == "__main__":
     MIN_GROUP_SAMPLES = config.get("min_group_samples", 200)
 
     # 2. 读取数据并分组汇总
-    clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/cleaned_data/cleaned_data.xlsx"))
+    clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/data/feature_engineered_data/featured_data.xlsx"))
     clean_df = build_setpoint_group_key(clean_df)
     group_sizes = summarize_setpoint_groups(clean_df)
 
-    # 全量训练前 EDA
-    valid_labels = group_sizes[group_sizes >= MIN_GROUP_SAMPLES].index.tolist()
+    # # 全量训练前 EDA
+    # valid_labels = group_sizes[group_sizes >= MIN_GROUP_SAMPLES].index.tolist()
 
-    for surface in ["Top", "Bot"]:
-        # 确保衍生列存在（与训练时一致）
-        prefix = "Top" if surface == "Top" else "Bot"
-        speed_col = "Speed[m/min]_Process_Avg"
-        current_col = f"{prefix}_Current_Sum"
-        per_speed = f"{prefix}_Current_Per_Speed"
-        weight_deviation = f"{prefix}_Weight_Deviation"
-        online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
-        setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
-        
-        clean_df = clean_df.copy()
-        
-        # 衍生 Current_Per_Speed
-        if current_col in clean_df.columns and speed_col in clean_df.columns:
-            if per_speed not in clean_df.columns:
-                clean_df[per_speed] = clean_df[current_col] / (clean_df[speed_col] + 1e-5)
-        
-        # 衍生 Weight_Deviation
-        if online_col in clean_df.columns and setpoint_weight in clean_df.columns:
-            if weight_deviation not in clean_df.columns:
-                clean_df[weight_deviation] = clean_df[setpoint_weight] - clean_df[online_col]
-
-        eda_global = SurfaceEDAAnalyzer(
-            default_save_dir=f"result/grouped_by_coating_weight/eda_pre_global/{surface}"
-        )
-        eda_global.analyze(
-            df=clean_df,
-            surface=surface,
-            feature_cols=get_feature_cols(surface),  # ← 与训练完全一致
-            group_col="Setpoint_Group_Label",
-            target_groups=valid_labels,
-            time_col="Produce Time",
-            plot_train_test=False,
-            plot_model_residual=False,
-            max_groups=20,
-        )
+    # for surface in ["Top", "Bot"]:
+    #     # 确保衍生列存在（与训练时一致）
+    #     prefix = "Top" if surface == "Top" else "Bot"
+    #     speed_col = "Speed[m/min]_Process_Avg"
+    #     current_col = f"{prefix}_Current_Sum"
+    #     per_speed = f"{prefix}_Current_Per_Speed"
+    #     weight_deviation = f"{prefix}_Weight_Deviation"
+    #     online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+    #     setpoint_weight = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+    #
+    #     clean_df = clean_df.copy()
+    #
+    #     # 衍生 Current_Per_Speed
+    #     if current_col in clean_df.columns and speed_col in clean_df.columns:
+    #         if per_speed not in clean_df.columns:
+    #             clean_df[per_speed] = clean_df[current_col] / (clean_df[speed_col] + 1e-5)
+    #
+    #     # 衍生 Weight_Deviation
+    #     if online_col in clean_df.columns and setpoint_weight in clean_df.columns:
+    #         if weight_deviation not in clean_df.columns:
+    #             clean_df[weight_deviation] = clean_df[setpoint_weight] - clean_df[online_col]
+    #
+    #     eda_global = SurfaceEDAAnalyzer(
+    #         default_save_dir=f"result/grouped_by_coating_weight/eda_pre_global/{surface}"
+    #     )
+    #     eda_global.analyze(
+    #         df=clean_df,
+    #         surface=surface,
+    #         feature_cols=get_feature_cols(surface),  # ← 与训练完全一致
+    #         group_col="Setpoint_Group_Label",
+    #         target_groups=valid_labels,
+    #         time_col="Produce Time",
+    #         plot_train_test=False,
+    #         plot_model_residual=False,
+    #         max_groups=20,
+    #     )
 
 
     # 3. 过滤要运行的目标规格组
@@ -1065,7 +1098,9 @@ if __name__ == "__main__":
         lambda s: '建模' if s >= MIN_GROUP_SAMPLES else '跳过'
     )
 
-    report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
+    report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_all_the_same_2.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_optimal.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_reducing_overfitting.xlsx"  # 降低过拟合
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_expanding_window.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_linear_for_overfitting.xlsx"
@@ -1088,6 +1123,14 @@ if __name__ == "__main__":
             mask_neg_zero = (metrics_df['负偏差样本数_测试'] == 0)
             metrics_df.loc[mask_neg_zero, '负偏差MAE_在线_测试'] = np.nan
             metrics_df.loc[mask_neg_zero, '负偏差MAE_模型_测试'] = np.nan
+
+            mask_pos_zero = (metrics_df['正偏差样本数_测试'] == 0)
+            metrics_df.loc[mask_pos_zero, ['正偏差MAE_在线_测试', '正偏差MAE_模型_测试',
+                                           '正偏差RMSE_在线_测试', '正偏差RMSE_模型_测试']] = np.nan
+
+            mask_neg_zero = (metrics_df['负偏差样本数_测试'] == 0)
+            metrics_df.loc[mask_neg_zero, ['负偏差MAE_在线_测试', '负偏差MAE_模型_测试',
+                                           '负偏差RMSE_在线_测试', '负偏差RMSE_模型_测试']] = np.nan
             # ==========================================
             metrics_df.to_excel(writer, sheet_name='建模效果汇总', index=False)
         else:

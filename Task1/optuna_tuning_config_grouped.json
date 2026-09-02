@@ -2,7 +2,7 @@
   "mode": "per_group",
   "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
   "min_samples": 200,
-  "n_trials": 40,
+  "n_trials": 50,
   "groups": [
     "Top2.799_Bot2.799",
     "Top2.0_Bot2.0",

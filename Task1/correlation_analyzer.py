@@ -1,4 +1,5 @@
 import os
+import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -98,25 +99,23 @@ class SurfaceCorrelationAnalyzer:
 
         actual_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
         lab_col = f'{surface_cn}表面镀层重量A(XA1_0)'
-        delta_col=f'{prefix}_Residual'
+        delta_col = f'{prefix}_Delta'
         # setpoint_col=f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Min'
         setpoint_col = f'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
 
         speed_col = 'Speed[m/min]_Process_Avg'
         current_col = f'{prefix}_Current_Sum'
 
-
-
         df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
-        df[f'{prefix}_Residual'] = df[lab_col] - df[actual_col]  # 计算测量误差
-        df[f'{prefix}_Deviation'] = df[setpoint_col] - df[actual_col] # 计算偏差
+        df[f'{prefix}_Delta'] = df[lab_col] - df[actual_col]  # 计算测量误差Delta
+        # df[f'{prefix}_Deviation'] = df[setpoint_col] - df[actual_col]  # 计算偏差
 
         df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
 
         cols_to_check = [
             delta_col,
             actual_col,
-            f'{prefix}_Deviation',
+            # f'{prefix}_Deviation',
             f'{prefix}_Current_Sum',
             f'{prefix}_Current_Per_Speed',
             f'{prefix}_Theoretical_Factor',
@@ -126,7 +125,6 @@ class SurfaceCorrelationAnalyzer:
             # 'Dimension_[mm]_Length',
             'Steel_Grade_Encoded'
         ]
-
 
         if extra_cols:
             for col in extra_cols:
@@ -150,17 +148,17 @@ class SurfaceCorrelationAnalyzer:
         for method in methods:
             corr_matrix = data.corr(method=method)
 
-            # ---------- 按与测量误差的相关性绝对值排序 ----------
-            delta_col = f'{prefix}_Residual'
+            # ---------- 按与测量误差Delta的相关性绝对值排序 ----------
+            delta_col = f'{prefix}_Delta'
             if delta_col in corr_matrix.columns:
-                # 按与测量误差的 |corr| 降序
+                # 按与测量误差Delta的 |corr| 降序
                 order = corr_matrix[delta_col].abs().sort_values(ascending=False).index.tolist()
                 corr_matrix = corr_matrix.loc[order, order]
             # ---------------------------------------------
 
             result[f'corr_{method}'] = corr_matrix
 
-            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵（按测量误差|corr|排序）】 ========")
+            print(f"\n======== 【{surface_cn}表面 {method.upper()} 相关性矩阵（按测量误差DeltaDelta|corr|排序）】 ========")
             print(corr_matrix[delta_col].sort_values(ascending=False))
 
             plt.figure(figsize=(10, 8))
@@ -173,7 +171,7 @@ class SurfaceCorrelationAnalyzer:
                 vmax=1,
                 square=True
             )
-            plt.title(f'{surface_cn}表面参数与测量误差 {method.upper()} 相关性热力图（按|corr|排序）')
+            plt.title(f'{surface_cn}表面参数与测量误差Delta {method.upper()} 相关性热力图（按|corr|排序）')
             plt.tight_layout()
 
             save_img_path = os.path.join(out_dir, f"correlation_{surface}_{method}.png")
@@ -182,7 +180,7 @@ class SurfaceCorrelationAnalyzer:
             print(f"[图表保存] {save_img_path}")
 
         # ====================== 2. Mutual Information ======================
-        delta_col = f'{prefix}_Residual'
+        delta_col = f'{prefix}_Delta'
 
         if compute_mi and delta_col in data.columns:
             feature_cols = [c for c in existing_cols if c != delta_col]
@@ -190,7 +188,7 @@ class SurfaceCorrelationAnalyzer:
                 print("没有可用于 Mutual Information 的特征列。")
             else:
                 X = data[feature_cols]
-                y = data[delta_col]  # 目标改为测量误差
+                y = data[delta_col]  # 目标改为测量误差Delta
 
                 mi_scores = mutual_info_regression(
                     X, y,
@@ -199,13 +197,13 @@ class SurfaceCorrelationAnalyzer:
                 mi_series = pd.Series(mi_scores, index=feature_cols).sort_values(ascending=False)
                 result['mi'] = mi_series
 
-                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：测量误差）】 ========")
+                print(f"\n======== 【{surface_cn}表面 Mutual Information（目标：测量误差Delta）】 ========")
                 print(mi_series)
 
                 plt.figure(figsize=(8, max(4, len(mi_series) * 0.4)))
                 mi_series.sort_values().plot(kind='barh', color='steelblue')
                 plt.xlabel('Mutual Information')
-                plt.title(f'{surface_cn}表面特征对测量误差的 Mutual Information')
+                plt.title(f'{surface_cn}表面特征对测量误差Delta的 Mutual Information')
                 plt.tight_layout()
 
                 save_mi_path = os.path.join(out_dir, f"mi_importance_{surface}.png")
@@ -232,13 +230,13 @@ class SurfaceCorrelationAnalyzer:
             for col in mi_matrix.columns:
                 mi_matrix.loc[col, col] = 0.0
 
-            # ---------- 按与测量误差的 MI 值排序（测量误差固定第一位） ----------
+            # ---------- 按与测量误差Delta的 MI 值排序（测量误差Delta固定第一位） ----------
             if delta_col in mi_matrix.columns:
-                # 先取出与测量误差的 MI，排除自己
+                # 先取出与测量误差Delta的 MI，排除自己
                 mi_with_delta = mi_matrix[delta_col].drop(delta_col)
                 # 按绝对值从大到小排序
                 other_order = mi_with_delta.abs().sort_values(ascending=False).index.tolist()
-                # 测量误差放第一位，后面跟排序后的其他变量
+                # 测量误差Delta放第一位，后面跟排序后的其他变量
                 order = [delta_col] + other_order
                 mi_matrix = mi_matrix.loc[order, order]
 
@@ -270,13 +268,13 @@ class SurfaceCorrelationAnalyzer:
             dcor_series = pd.Series(dcor_scores).sort_values(ascending=False)
             result['dcor'] = dcor_series
 
-            print(f"\n======== 【{surface_cn}表面 距离相关性（目标：测量误差）】 ========")
+            print(f"\n======== 【{surface_cn}表面 距离相关性（目标：测量误差Delta）】 ========")
             print(dcor_series)
 
             plt.figure(figsize=(8, max(4, len(dcor_series) * 0.4)))
             dcor_series.sort_values().plot(kind='barh', color='darkorange')
             plt.xlabel('Distance Correlation')
-            plt.title(f'{surface_cn}表面特征对测量误差的距离相关性')
+            plt.title(f'{surface_cn}表面特征对测量误差Delta的距离相关性')
             plt.tight_layout()
 
             save_dcor_path = os.path.join(out_dir, f"dcor_importance_{surface}.png")
@@ -303,7 +301,7 @@ class SurfaceCorrelationAnalyzer:
                             dcor_matrix.iloc[i, j] = val
                             dcor_matrix.iloc[j, i] = val
 
-            #  dcor_matrix 按照对测量误差的距离相关性绝对值排序
+            #  dcor_matrix 按照对测量误差Delta的距离相关性绝对值排序
             if delta_col in dcor_matrix.columns:
                 order = dcor_matrix[delta_col].abs().sort_values(ascending=False).index.tolist()
                 dcor_matrix = dcor_matrix.loc[order, order]
@@ -320,31 +318,101 @@ class SurfaceCorrelationAnalyzer:
 
         return result
 
-if __name__ == "__main__":
-    # # 读取清洗后的数据
-    # cleaned_df = pd.read_excel("result/cleaned_data/cleaned_data.xlsx")
-    # analyzer = SurfaceCorrelationAnalyzer(default_save_dir="result/correlation_result")
 
-    featured_df = pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
+if __name__ == "__main__":
+    # 延迟导入，避免与 coating_model_by_group 循环引用
+    from coating_model_by_group import (
+        build_setpoint_group_key,
+        summarize_setpoint_groups,
+        MIN_GROUP_SAMPLES,
+    )
+
+    CORR_MIN_SAMPLES = MIN_GROUP_SAMPLES  # 需要更松时可改成 50 等
+
+    parser = argparse.ArgumentParser(description="镀层表面相关性分析（全量 / 分规格组）")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="both",
+        choices=["full", "group", "both"],
+        help="运行模式: full=仅全量, group=仅分规格组, both=先全量再分组 (默认 both)",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        help=f"分规格组时的最小样本数 (默认 {CORR_MIN_SAMPLES})",
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default="result/data/feature_engineered_data/featured_data.xlsx",
+        help="输入数据路径",
+    )
+    args = parser.parse_args()
+
+    min_samples = args.min_samples if args.min_samples is not None else CORR_MIN_SAMPLES
+
+    featured_df = pd.read_excel(args.data)
     analyzer = SurfaceCorrelationAnalyzer(default_save_dir="result/correlation_result")
 
-
-    # 分表面整体分析
-    for surface in ['Top', 'Bot']:
+    # ---------- 全量 ----------
+    if args.mode in ("full", "both"):
         print("\n" + "=" * 60)
-        print(f"开始分析 {surface} 表面")
+        print("开始【全量数据】相关性分析")
         print("=" * 60)
-        analyzer.analyze_surface(
-            featured_df,
-            surface=surface,
-            extra_cols=None,
-            save_dir="result/correlation_result",
-            corr_method='both',      # 同时出 pearson + spearman
-            compute_mi=True,         # 计算 Mutual Information
-            compute_dcor=True,       # 计算距离相关性
-            compute_mi_matrix=True,   # 计算全变量 MI 矩阵
-            compute_dcor_matrix=True,  # 计算全变量距离相关性矩阵
-            mi_random_state=42
-        )
+        for surface in ["Top", "Bot"]:
+            print("\n" + "-" * 40)
+            print(f"全量 | {surface} 表面")
+            print("-" * 40)
+            analyzer.analyze_surface(
+                featured_df,
+                surface=surface,
+                extra_cols=None,
+                save_dir="result/correlation_result/full",
+                corr_method="both",
+                compute_mi=True,
+                compute_dcor=True,
+                compute_mi_matrix=True,
+                compute_dcor_matrix=True,
+                mi_random_state=42,
+            )
+
+    # ---------- 分规格组 ----------
+    if args.mode in ("group", "both"):
+        print("\n" + "=" * 60)
+        print("开始【分规格组】相关性分析")
+        print("=" * 60)
+
+        df = build_setpoint_group_key(featured_df)
+        group_sizes = summarize_setpoint_groups(df)
+
+        for group_label, size in group_sizes.items():
+            if size < min_samples:
+                print(f"[跳过] 规格组 {group_label} 样本量 {size} < {min_samples}")
+                continue
+
+            group_df = df[df["Setpoint_Group_Label"] == group_label].copy()
+            save_dir = f"result/correlation_result/grouped/{group_label}"
+
+            # 小样本时关掉全变量矩阵，加快速度并避免不稳定
+            do_matrix = size >= 300
+
+            for surface in ["Top", "Bot"]:
+                print("\n" + "-" * 40)
+                print(f"规格组 {group_label} | {surface} 表面 | n={size}")
+                print("-" * 40)
+                analyzer.analyze_surface(
+                    group_df,
+                    surface=surface,
+                    extra_cols=None,
+                    save_dir=save_dir,
+                    corr_method="both",
+                    compute_mi=True,
+                    compute_dcor=True,
+                    compute_mi_matrix=do_matrix,
+                    compute_dcor_matrix=do_matrix,
+                    mi_random_state=42,
+                )
 
     print("\n全部完成。结果保存在: result/correlation_result/")

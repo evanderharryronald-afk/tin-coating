@@ -2,6 +2,9 @@
   "mode": "global",
   "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
   "min_samples": 200,
-  "n_trials": 50,
+  "n_trials": 80,
+  "eval_test_after_tuning": true,
+  "train_ratio": 0.65,
+  "val_ratio": 0.20,
   "groups": null
 }

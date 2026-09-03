@@ -3,6 +3,9 @@
   "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
   "min_samples": 200,
   "n_trials": 50,
+  "eval_test_after_tuning": true,
+  "train_ratio": 0.65,
+  "val_ratio": 0.20,
   "groups": [
     "Top2.799_Bot2.799",
     "Top2.0_Bot2.0",

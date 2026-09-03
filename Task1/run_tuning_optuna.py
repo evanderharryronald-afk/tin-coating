@@ -65,17 +65,16 @@ def make_objective(group_df, surface, group_tag, train_ratio=0.65, val_ratio=0.2
             )
 
             # 使用验证集指标（避免数据泄露）
+            # 在线偏高 = residual < 0；在线偏低 = residual > 0
             rmse = metrics["RMSE_模型_验证"]
-            worst_mae = max(
-                metrics["正偏差MAE_模型_验证"],
-                metrics["负偏差MAE_模型_验证"]
-            )
+            high_mae = metrics["在线偏高MAE_模型_验证"]
+            low_mae = metrics["在线偏低MAE_模型_验证"]
+            # 某一方向样本为 0 时为 NaN，取有效一侧；两侧都有效则取最差
+            candidates = [v for v in (high_mae, low_mae) if not np.isnan(v)]
+            worst_mae = max(candidates) if candidates else float("inf")
 
-            # 处理可能的 NaN（某一方向样本为 0 时）
             if np.isnan(rmse):
                 rmse = float("inf")
-            if np.isnan(worst_mae):
-                worst_mae = float("inf")
 
         except Exception as e:
             import traceback
@@ -124,11 +123,10 @@ def evaluate_best_trials_on_test(study, group_df, group_label, surface,
             )
 
             test_rmse = metrics.get("RMSE_模型_测试", np.nan)
-            test_worst_mae = max(
-                metrics.get("正偏差MAE_模型_测试", np.nan),
-                metrics.get("负偏差MAE_模型_测试", np.nan)
-            )
-            # 若某一方向无样本，max 可能仍是 NaN，保持 NaN 即可
+            high_mae_t = metrics.get("在线偏高MAE_模型_测试", np.nan)
+            low_mae_t = metrics.get("在线偏低MAE_模型_测试", np.nan)
+            test_candidates = [v for v in (high_mae_t, low_mae_t) if not np.isnan(v)]
+            test_worst_mae = max(test_candidates) if test_candidates else np.nan
 
             rec = {
                 "规格组": group_label,
@@ -138,16 +136,16 @@ def evaluate_best_trials_on_test(study, group_df, group_label, surface,
                 # 验证集（Optuna 优化目标）
                 "RMSE_模型_验证": t.values[0],
                 "最差方向MAE_验证": t.values[1],
-                "正偏差MAE_模型_验证": metrics.get("正偏差MAE_模型_验证", np.nan),
-                "负偏差MAE_模型_验证": metrics.get("负偏差MAE_模型_验证", np.nan),
+                "在线偏高MAE_模型_验证": metrics.get("在线偏高MAE_模型_验证", np.nan),
+                "在线偏低MAE_模型_验证": metrics.get("在线偏低MAE_模型_验证", np.nan),
                 "MAE_模型_验证": metrics.get("MAE_模型_验证", np.nan),
                 "R2_模型_验证": metrics.get("R2_模型_验证", np.nan),
 
                 # 测试集（仅观察）
                 "RMSE_模型_测试": test_rmse,
                 "最差方向MAE_测试": test_worst_mae,
-                "正偏差MAE_模型_测试": metrics.get("正偏差MAE_模型_测试", np.nan),
-                "负偏差MAE_模型_测试": metrics.get("负偏差MAE_模型_测试", np.nan),
+                "在线偏高MAE_模型_测试": high_mae_t,
+                "在线偏低MAE_模型_测试": low_mae_t,
                 "MAE_模型_测试": metrics.get("MAE_模型_测试", np.nan),
                 "R2_模型_测试": metrics.get("R2_模型_测试", np.nan),
             }
@@ -300,11 +298,11 @@ def save_summary(all_best_trials, mode):
         "规格组", "表面", "Tag", "trial_number",
         # 验证集
         "RMSE_模型_验证", "最差方向MAE_验证",
-        "正偏差MAE_模型_验证", "负偏差MAE_模型_验证",
+        "在线偏高MAE_模型_验证", "在线偏低MAE_模型_验证",
         "MAE_模型_验证", "R2_模型_验证",
         # 测试集
         "RMSE_模型_测试", "最差方向MAE_测试",
-        "正偏差MAE_模型_测试", "负偏差MAE_模型_测试",
+        "在线偏高MAE_模型_测试", "在线偏低MAE_模型_测试",
         "MAE_模型_测试", "R2_模型_测试",
     ]
     first_cols = [c for c in preferred if c in global_summary_df.columns]
@@ -397,14 +395,14 @@ def run_per_group_tuning(data_path, config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="镀锌模型多规格组 Optuna 自动调参脚本")
-    parser.add_argument(
-        "--config", type=str, default="optuna_tuning_config_global.json",
-        help="配置文件路径 (默认: optuna_tuning_config_global.json)"
-    )
     # parser.add_argument(
-    #     "--config", type=str, default="optuna_tuning_config_grouped.json",
-    #     help="配置文件路径 (默认: optuna_tuning_config_grouped.json)"
+    #     "--config", type=str, default="optuna_tuning_config_global.json",
+    #     help="配置文件路径 (默认: optuna_tuning_config_global.json)"
     # )
+    parser.add_argument(
+        "--config", type=str, default="optuna_tuning_config_grouped.json",
+        help="配置文件路径 (默认: optuna_tuning_config_grouped.json)"
+    )
     args = parser.parse_args()
 
     # 1. 加载 JSON 配置

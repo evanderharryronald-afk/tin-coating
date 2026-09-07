@@ -1,0 +1,20 @@
+{
+  "pre_diagnosis_dir": "result/eda/pre_modeling",
+  "post_diagnosis_dir": "result/eda/post_modeling",
+  "eda_top": {
+    "enabled": true,
+    "compute_stats_only_pre": true,
+    "compute_stats_only_post": true,
+    "max_groups": 5,
+    "sample_for_scatter": 3000,
+    "enable_overall": true,
+    "enable_by_group": false,
+    "group_col": null,
+    "target_groups": null
+  },
+  "eda_bot": {
+    "enabled": false,
+    "enable_overall": false,
+    "enable_by_group": false
+  }
+}

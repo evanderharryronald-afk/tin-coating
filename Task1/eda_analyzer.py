@@ -231,9 +231,9 @@ class SurfaceEDAAnalyzer:
 
         # ---------- 5. 分规格分析 ----------
         if enable_by_group and group_col and group_col in data.columns:
-            group_dir = os.path.join(out_dir, "by_group") if not compute_stats_only else None
-            if group_dir:
-                os.makedirs(group_dir, exist_ok=True)
+            # 注意：out_dir 已经由调用方指定为包含by_group的完整路径
+            # 例如：pre_diagnosis_dir/by_group/{group_label}/{surface}
+            # 所以这里直接在out_dir下创建规格子目录，不再创建"by_group"这一层
 
             result["stats"]["by_group"] = {}
             result["paths"]["by_group"] = {}
@@ -242,42 +242,58 @@ class SurfaceEDAAnalyzer:
             print(f"[分规格分析] 开始处理分组数据")
             print(f"{'=' * 50}")
 
-            vc = data[group_col].value_counts()
+            # 先根据target_groups过滤数据（如果指定了白名单）
+            if target_groups is not None:
+                # 只保留target_groups中的数据
+                data_for_group = data[data[group_col].isin(target_groups)].copy()
+                print(f"[分规格] 使用 target_groups 白名单，指定 {len(target_groups)} 个组")
+                print(f"[分规格] 数据中实际包含 {len([g for g in target_groups if g in data[group_col].unique()])} 个规格")
+            else:
+                data_for_group = data.copy()
+
+            vc = data_for_group[group_col].value_counts()
             if target_groups is not None:
                 top_groups = [g for g in target_groups if g in vc.index]
-                print(f"[分规格] 使用 target_groups 白名单，共 {len(top_groups)} 个组")
             else:
                 top_groups = vc.head(max_groups).index.tolist()
                 print(f"[分规格] 共 {vc.nunique()} 个规格，分析频次最高的 {len(top_groups)} 个")
 
+            # 收集有效规格（样本数>=30）
+            valid_groups = []
             for g in top_groups:
-                g_data = data[data[group_col] == g]
+                g_data = data_for_group[data_for_group[group_col] == g]
                 if len(g_data) < 30:
                     print(f"  规格 {g} 样本过少({len(g_data)})，跳过")
                     continue
-                g_name = str(g).replace("/", "_").replace("\\", "_")[:40]
-                g_save = os.path.join(group_dir, g_name) if group_dir else None
-                if g_save:
+                valid_groups.append((g, g_data))
+            
+            # 只有当存在有效规格时才继续
+            if valid_groups:
+                for g, g_data in valid_groups:
+                    g_name = str(g).replace("/", "_").replace("\\", "_")[:40]
+                    # 直接在out_dir下创建规格子目录，不再包装with by_group层
+                    g_save = os.path.join(out_dir, g_name)
                     os.makedirs(g_save, exist_ok=True)
-                print(f"  -> 规格 {g} (n={len(g_data)})")
-                result["stats"]["by_group"][g] = self._run_single_analysis(
-                    data=g_data,
-                    delta_col=delta_col,
-                    feature_cols=feature_cols,
-                    time_col=time_col if has_time else None,
-                    save_dir=g_save,
-                    title_prefix=f"规格[{g}]",
-                    plot_univariate=plot_univariate and not compute_stats_only,
-                    plot_vs_delta=plot_vs_delta and not compute_stats_only,
-                    plot_time=plot_time and not compute_stats_only,
-                    sample_for_scatter=sample_for_scatter,
-                    random_state=random_state,
-                    figsize_univariate=figsize_univariate,
-                    compute_stats_only=compute_stats_only,
-                )
-                if g_save:
+                    print(f"  -> 规格 {g} (n={len(g_data)})")
+                    result["stats"]["by_group"][g] = self._run_single_analysis(
+                        data=g_data,
+                        delta_col=delta_col,
+                        feature_cols=feature_cols,
+                        time_col=time_col if has_time else None,
+                        save_dir=g_save,
+                        title_prefix=f"规格[{g}]",
+                        plot_univariate=plot_univariate and not compute_stats_only,
+                        plot_vs_delta=plot_vs_delta and not compute_stats_only,
+                        plot_time=plot_time and not compute_stats_only,
+                        sample_for_scatter=sample_for_scatter,
+                        random_state=random_state,
+                        figsize_univariate=figsize_univariate,
+                        compute_stats_only=compute_stats_only,
+                    )
                     result["paths"]["by_group"][g] = g_save
-            print(f"[分规格分析] 完成")
+                print(f"[分规格分析] 完成 (共 {len(valid_groups)} 个有效规格)")
+            else:
+                print(f"[分规格分析] 没有有效规格（样本数≥30），跳过")
         elif enable_by_group and not group_col:
             print(f"\n[分规格分析] 已跳过 (未指定 group_col)")
         else:
@@ -338,7 +354,9 @@ class SurfaceEDAAnalyzer:
         result["summary_df"] = self._build_summary_df(result["stats"], delta_col)
 
         # ========== 导出 Excel 总结 ==========
-        if not compute_stats_only and out_dir:
+        # 只有当有实际分析内容时才导出 Excel
+        has_content = enable_overall or (enable_by_group and result["stats"]["by_group"])
+        if not compute_stats_only and out_dir and has_content:
             try:
                 excel_path = os.path.join(out_dir, "eda_summary.xlsx")
                 self.export_summary_to_excel(

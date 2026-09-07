@@ -1,0 +1,26 @@
+{
+  "pre_diagnosis_dir": "result/eda/pre_modeling",
+  "post_diagnosis_dir": "result/eda/post_modeling",
+  "eda_top": {
+    "enabled": true,
+    "compute_stats_only_pre": true,
+    "compute_stats_only_post": false,
+    "max_groups": 12,
+    "sample_for_scatter": 8000,
+    "enable_overall": false,
+    "enable_by_group": true,
+    "group_col": "Setpoint_Group_Label",
+    "target_groups": ["Top2.799_Bot2.799"]
+  },
+  "eda_bot": {
+    "enabled": true,
+    "compute_stats_only_pre": true,
+    "compute_stats_only_post": false,
+    "max_groups": 12,
+    "sample_for_scatter": 8000,
+    "enable_overall": false,
+    "enable_by_group": true,
+    "group_col": "Setpoint_Group_Label",
+    "target_groups": ["Top2.799_Bot2.799"]
+  }
+}

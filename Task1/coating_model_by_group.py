@@ -9,12 +9,14 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from data_cleaner import SteelDataCleaner
 import argparse
+import json
 from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from correlation_analyzer import SurfaceCorrelationAnalyzer
 from model_interpreter import ModelInterpreter   # ===== 模型解释性分析 =====
 from eda_analyzer import SurfaceEDAAnalyzer  # eda 数据分析， 模型训练前后
+from group_eda_manager import create_eda_diagnoser_from_config  # ===== EDA诊断管理 =====
 
 # 设置画图支持中文与负号，消除特殊字符警告
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -941,6 +943,36 @@ if __name__ == "__main__":
     config = load_pipeline_config(args.config)
     MIN_GROUP_SAMPLES = config.get("min_group_samples", 200)
 
+    # 初始化EDA诊断管理器 (整体分析，配置文件是 eda_config.json)
+    # eda_mgr = None
+    # if os.path.exists('eda_config.json'):
+    #     with open('eda_config.json', 'r', encoding='utf-8') as f:
+    #         eda_config = json.load(f)
+    #     eda_mgr = create_eda_diagnoser_from_config(eda_config)
+    #     print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
+    # else:
+    #     print("[提示] 未找到 eda_config.json，EDA诊断将被跳过")
+
+    # 初始化EDA诊断管理器 (分组分析，配置文件是 eda_config_with_group.json)
+
+    # eda_mgr = None  #(对指定的规格组分析，配置文件是 eda_config_specific_group.json)
+    # if os.path.exists('eda_config_specific_group.json'):
+    #     with open('eda_config_specific_group.json', 'r', encoding='utf-8') as f:
+    #         eda_config = json.load(f)
+    #     eda_mgr = create_eda_diagnoser_from_config(eda_config)
+    #     print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
+    # else:
+    #     print("[提示] 未找到 eda_config_specific_group.json，EDA诊断将被跳过")
+
+    eda_mgr = None  #(分规格组分析，配置文件是 eda_config_with_group.json)
+    if os.path.exists('eda_config_with_group.json'):
+        with open('eda_config_with_group.json', 'r', encoding='utf-8') as f:
+            eda_config = json.load(f)
+        eda_mgr = create_eda_diagnoser_from_config(eda_config)
+        print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
+    else:
+        print("[提示] 未找到 eda_config_specific_group.json，EDA诊断将被跳过")
+
     # 2. 读取数据并分组汇总
     clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/data/feature_engineered_data/featured_data.xlsx"))
     clean_df = build_setpoint_group_key(clean_df)
@@ -989,6 +1021,11 @@ if __name__ == "__main__":
         top_params = get_params_for_group(config, group_label, 'Top')
         bot_params = get_params_for_group(config, group_label, 'Bot')
 
+        # ========== 建模前EDA诊断 ==========
+        if eda_mgr:
+            print(f"\n[EDA] 开始建模前诊断...")
+            pre_diagnosis = eda_mgr.pre_modeling_diagnosis(group_df, group_label)
+
         top_model, top_metrics = run_surface_pipeline(
             group_df, surface='Top', group_tag=group_label, group_params=top_params,
             train_ratio=0.65, val_ratio=0.20
@@ -997,6 +1034,15 @@ if __name__ == "__main__":
             group_df, surface='Bot', group_tag=group_label, group_params=bot_params,
             train_ratio=0.65, val_ratio=0.20
         )
+
+        # ========== 建模后EDA诊断 ==========
+        if eda_mgr:
+            print(f"\n[EDA] 开始建模后诊断...")
+            post_diagnosis = eda_mgr.post_modeling_diagnosis(
+                group_df,
+                models={'Top': top_model, 'Bot': bot_model},
+                group_label=group_label
+            )
 
         trained_models[(group_label, 'Top')] = top_model
         trained_models[(group_label, 'Bot')] = bot_model

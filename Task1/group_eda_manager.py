@@ -316,12 +316,16 @@ class GroupEDADiagnoser:
                                 group_col: Optional[str] = None,
                                 target_groups: Optional[List[str]] = None) -> Dict[str, Dict]:
         """
-        建模后诊断：残差质量、方向性偏差、模型校正效果
+        建模后诊断：分析模型残差质量、残差分布、按规格的模型性能差异
+        
+        注：建模后分析模型残差（Model_Residual = Actual_Delta - Predicted_Delta）
+        而不是测量误差（Delta），以评估模型的预测性能
         
         Parameters
         ----------
         df : pd.DataFrame
-            包含原始数据和预测结果的DataFrame
+            包含原始数据、预测结果和模型残差的DataFrame
+            必须包含 {surface}_Model_Residual 列
         models : Dict[str, Any]
             训练好的模型字典，如 {'Top': model_obj, 'Bot': model_obj}
         group_label : str
@@ -335,13 +339,13 @@ class GroupEDADiagnoser:
         group_col : Optional[str]
             分规格列名，运行时指定则覆盖config中的设置
         target_groups : Optional[List[str]]
-            规格白名单，运行时指定则覆盖config中的设置
+            规格白名单，仅分析指定的规格，运行时指定则覆盖config中的设置
         
         Returns
         -------
         Dict[str, Dict]
             按表面名称组织的诊断结果
-            {'Top': {...结果...}, 'Bot': {...结果...}}
+            {'Top': {...残差分析结果...}, 'Bot': {...残差分析结果...}}
         """
         surfaces = surfaces or self.surfaces
         results = {}
@@ -376,15 +380,15 @@ class GroupEDADiagnoser:
                 # By Group: post_diagnosis_dir/by_group/{group_label}/{surface}/
                 if _enable_overall and not _enable_by_group:
                     # 纯overall模式
+                    # Post-modeling 分析模型残差而非测量误差
                     save_dir = f'{self.post_diagnosis_dir}/overall/{surface}'
                     os.makedirs(save_dir, exist_ok=True)
                     
                     result = self.analyzer.analyze(
                         df=df.copy(),
                         surface=surface,
-                        delta_col=f'{surface}_Delta',
+                        delta_col=f'{surface}_Model_Residual',  # 分析模型残差
                         feature_cols=self._get_feature_cols(surface),
-                        model_residual_col=f'{surface}_Model_Residual',
                         compute_stats_only=config.compute_stats_only_post,
                         max_groups=config.max_groups,
                         sample_for_scatter=config.sample_for_scatter,
@@ -429,9 +433,8 @@ class GroupEDADiagnoser:
                     result = self.analyzer.analyze(
                         df=df.copy(),
                         surface=surface,
-                        delta_col=f'{surface}_Delta',
+                        delta_col=f'{surface}_Model_Residual',  # 分析模型残差
                         feature_cols=self._get_feature_cols(surface),
-                        model_residual_col=f'{surface}_Model_Residual',
                         compute_stats_only=config.compute_stats_only_post,
                         max_groups=config.max_groups,
                         sample_for_scatter=config.sample_for_scatter,
@@ -455,9 +458,8 @@ class GroupEDADiagnoser:
                         overall_result = self.analyzer.analyze(
                             df=df.copy(),
                             surface=surface,
-                            delta_col=f'{surface}_Delta',
+                            delta_col=f'{surface}_Model_Residual',  # 分析模型残差
                             feature_cols=self._get_feature_cols(surface),
-                            model_residual_col=f'{surface}_Model_Residual',
                             compute_stats_only=config.compute_stats_only_post,
                             max_groups=config.max_groups,
                             sample_for_scatter=config.sample_for_scatter,
@@ -471,9 +473,9 @@ class GroupEDADiagnoser:
                     if _enable_by_group:
                         # 先检查是否有有效的规格（样本数>=30）
                         work_check = df.copy()
-                        delta_col_check = f'{surface}_Delta'
-                        if delta_col_check in work_check.columns:
-                            data_check = work_check[[_group_col, delta_col_check]].dropna(subset=[delta_col_check])
+                        model_residual_col_check = f'{surface}_Model_Residual'
+                        if model_residual_col_check in work_check.columns:
+                            data_check = work_check[[_group_col, model_residual_col_check]].dropna(subset=[model_residual_col_check])
                             if _target_groups:
                                 data_check = data_check[data_check[_group_col].isin(_target_groups)]
                             
@@ -488,9 +490,8 @@ class GroupEDADiagnoser:
                                 by_group_result = self.analyzer.analyze(
                                     df=df.copy(),
                                     surface=surface,
-                                    delta_col=f'{surface}_Delta',
+                                    delta_col=f'{surface}_Model_Residual',  # 分析模型残差
                                     feature_cols=self._get_feature_cols(surface),
-                                    model_residual_col=f'{surface}_Model_Residual',
                                     compute_stats_only=config.compute_stats_only_post,
                                     max_groups=config.max_groups,
                                     sample_for_scatter=config.sample_for_scatter,

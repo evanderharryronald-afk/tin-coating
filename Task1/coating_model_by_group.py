@@ -901,10 +901,10 @@ def get_feature_cols(surface: str) -> list:
 # ==========================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="镀层重量分规格组模型训练脚本")
-    # parser.add_argument(                                           ## 只针对Top2.799_Bot2.799进行分析
-    #     "--config", type=str, default="group_params_2_799_only.json",
-    #     help="配置文件 JSON 路径 (默认: group_params_2_799_only.json)"
-    # )
+    parser.add_argument(                                           ## 只针对Top2.799_Bot2.799进行分析
+        "--config", type=str, default="group_params_2_799_only.json",
+        help="配置文件 JSON 路径 (默认: group_params_2_799_only.json)"
+    )
     # ==========================================
     # 6.1 所有规格组使用相同超参数，即对Top2.799_Bot2.799最优的超参数
     # ==========================================
@@ -932,10 +932,10 @@ if __name__ == "__main__":
     #     "--config", type=str, default="group_params_optimum_for_each_2.json",  ## 使用Optuna对各组搜索出来的最优的超参数
     #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_2.json)"
     # )
-    parser.add_argument(
-        "--config", type=str, default="group_params_optimum_for_each_3.json",  ## 使用Optuna对各组搜索出来的最优的超参数
-        help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_3.json)"
-    )
+    # parser.add_argument(
+    #     "--config", type=str, default="group_params_optimum_for_each_3.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_3.json)"
+    # )
 
     args = parser.parse_args()
 
@@ -955,23 +955,23 @@ if __name__ == "__main__":
 
     # 初始化EDA诊断管理器 (分组分析，配置文件是 eda_config_with_group.json)
 
-    # eda_mgr = None  #(对指定的规格组分析，配置文件是 eda_config_specific_group.json)
-    # if os.path.exists('eda_config_specific_group.json'):
-    #     with open('eda_config_specific_group.json', 'r', encoding='utf-8') as f:
-    #         eda_config = json.load(f)
-    #     eda_mgr = create_eda_diagnoser_from_config(eda_config)
-    #     print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
-    # else:
-    #     print("[提示] 未找到 eda_config_specific_group.json，EDA诊断将被跳过")
-
-    eda_mgr = None  #(分规格组分析，配置文件是 eda_config_with_group.json)
-    if os.path.exists('eda_config_with_group.json'):
-        with open('eda_config_with_group.json', 'r', encoding='utf-8') as f:
+    eda_mgr = None  #(对指定的规格组分析，配置文件是 eda_config_specific_group.json)
+    if os.path.exists('eda_config_specific_group.json'):
+        with open('eda_config_specific_group.json', 'r', encoding='utf-8') as f:
             eda_config = json.load(f)
         eda_mgr = create_eda_diagnoser_from_config(eda_config)
         print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
     else:
         print("[提示] 未找到 eda_config_specific_group.json，EDA诊断将被跳过")
+
+    # eda_mgr = None  #(分规格组分析，配置文件是 eda_config_with_group.json)
+    # if os.path.exists('eda_config_with_group.json'):
+    #     with open('eda_config_with_group.json', 'r', encoding='utf-8') as f:
+    #         eda_config = json.load(f)
+    #     eda_mgr = create_eda_diagnoser_from_config(eda_config)
+    #     print(f"[初始化] EDA诊断已启用，诊断表面: {eda_mgr.get_active_surfaces()}")
+    # else:
+    #     print("[提示] 未找到 eda_config_specific_group.json，EDA诊断将被跳过")
 
     # 2. 读取数据并分组汇总
     clean_df = pd.read_excel(config.get("data_paths", {}).get("clean_data", "result/data/feature_engineered_data/featured_data.xlsx"))
@@ -1038,8 +1038,46 @@ if __name__ == "__main__":
         # ========== 建模后EDA诊断 ==========
         if eda_mgr:
             print(f"\n[EDA] 开始建模后诊断...")
+            
+            # 生成 Model_Residual 列（全量数据预测）
+            eda_df = group_df.copy()
+            
+            for surface in ['Top', 'Bot']:
+                prefix = 'Top' if surface == 'Top' else 'Bot'
+                model = {'Top': top_model, 'Bot': bot_model}[surface]
+                online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+                
+                # 准备特征
+                feature_cols = [
+                    f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg',
+                    f'{prefix}_Current_Sum',
+                    f'{prefix}_Current_Per_Speed',
+                    f'{prefix}_Theoretical_Factor',
+                    'Speed[m/min]_Process_Avg',
+                    'Dimension_[mm]_Width',
+                    'Dimension_[mm]_Thickness',
+                    'Steel_Grade_Encoded'
+                ]
+                
+                # 使用模型进行预测
+                try:
+                    X_data = eda_df[feature_cols]
+                    online_actual = eda_df[online_col]
+                    
+                    # 调用 predict_smooth 获得预测的镀层重量
+                    pred_weight, pred_delta = model.predict_smooth(X_data, online_actual)
+                    
+                    # 计算模型残差（实际Delta - 预测Delta）
+                    actual_delta = eda_df[f'{surface}_Delta']
+                    eda_df[f'{surface}_Model_Residual'] = actual_delta - pred_delta
+                    print(f"[✓] {surface}表面 Model_Residual 列已生成 (n={len(eda_df)})")
+                except Exception as e:
+                    print(f"[⚠] {surface}表面生成Model_Residual失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
             post_diagnosis = eda_mgr.post_modeling_diagnosis(
-                group_df,
+                eda_df,
                 models={'Top': top_model, 'Bot': bot_model},
                 group_label=group_label
             )
@@ -1061,12 +1099,12 @@ if __name__ == "__main__":
         lambda s: '建模' if s >= MIN_GROUP_SAMPLES else '跳过'
     )
 
-    # report_path = "result/grouped_by_coating_weight/summary_report_group_params_2_799_only.xlsx"
+    report_path = "result/grouped_by_coating_weight/summary_report_group_params_2_799_only.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_all_the_same_3.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_all_the_same.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_2.xlsx"
-    report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_3.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_3.xlsx"
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:

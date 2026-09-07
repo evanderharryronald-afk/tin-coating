@@ -222,6 +222,7 @@ class SurfaceEDAAnalyzer:
                 random_state=random_state,
                 figsize_univariate=figsize_univariate,
                 compute_stats_only=compute_stats_only,
+                analysis_type="residual" if "Residual" in delta_col else "delta",
             )
             if overall_dir:
                 result["paths"]["overall"] = overall_dir
@@ -289,6 +290,7 @@ class SurfaceEDAAnalyzer:
                         random_state=random_state,
                         figsize_univariate=figsize_univariate,
                         compute_stats_only=compute_stats_only,
+                        analysis_type="residual" if "Residual" in delta_col else "delta",
                     )
                     result["paths"]["by_group"][g] = g_save
                 print(f"[分规格分析] 完成 (共 {len(valid_groups)} 个有效规格)")
@@ -494,17 +496,24 @@ class SurfaceEDAAnalyzer:
         random_state: int,
         figsize_univariate: tuple,
         compute_stats_only: bool = False,
+        analysis_type: str = "delta",  # "delta" 或 "residual"
     ) -> Dict:
         stats_dict: Dict = {}
+        
+        # 根据分析类型确定标签和文件名前缀
+        label_name = "模型残差(Residual)" if analysis_type == "residual" else "测量偏差(Delta)"
+        vs_label = "模型残差(Residual) vs" if analysis_type == "residual" else "测量偏差(Delta) vs"
+        time_label = "模型残差(Residual)随时间变化" if analysis_type == "residual" else "测量偏差(Delta)随时间变化"
+        file_prefix = "residual" if analysis_type == "residual" else "delta"
 
-        # 1. 测量偏差自身分布（始终算统计；按需画图）
+        # 1. 测量偏差/残差自身分布（始终算统计；按需画图）
         stats_dict["delta"] = self._describe_series(data[delta_col])
         if plot_univariate and save_dir and not compute_stats_only:
             self._plot_univariate(
                 series=data[delta_col],
                 name=delta_col,
-                save_path=os.path.join(save_dir, "delta_dist.png"),
-                title=f"{title_prefix} 测量偏差(Delta)分布",
+                save_path=os.path.join(save_dir, f"{file_prefix}_dist.png"),
+                title=f"{title_prefix} {label_name}分布",
                 figsize=figsize_univariate,
                 stats_dict=stats_dict["delta"],
             )
@@ -533,7 +542,7 @@ class SurfaceEDAAnalyzer:
                         title=f"{title_prefix} 特征分布: {col}",
                     )
 
-        # 3. 特征 vs 测量偏差
+        # 3. 特征 vs 测量偏差/残差
         if plot_vs_delta and save_dir and not compute_stats_only:
             for col in feature_cols:
                 if not pd.api.types.is_numeric_dtype(data[col]):
@@ -541,28 +550,28 @@ class SurfaceEDAAnalyzer:
                         data=data,
                         delta_col=delta_col,
                         cat_col=col,
-                        save_path=os.path.join(save_dir, f"delta_vs_{self._safe_name(col)}.png"),
-                        title=f"{title_prefix} 测量偏差 vs {col}",
+                        save_path=os.path.join(save_dir, f"{file_prefix}_vs_{self._safe_name(col)}.png"),
+                        title=f"{title_prefix} {vs_label} {col}",
                     )
                 else:
                     self._plot_scatter_vs_residual(
                         data=data,
                         delta_col=delta_col,
                         feature_col=col,
-                        save_path=os.path.join(save_dir, f"delta_vs_{self._safe_name(col)}.png"),
-                        title=f"{title_prefix} 测量偏差 vs {col}",
+                        save_path=os.path.join(save_dir, f"{file_prefix}_vs_{self._safe_name(col)}.png"),
+                        title=f"{title_prefix} {vs_label} {col}",
                         sample_n=sample_for_scatter,
                         random_state=random_state,
                     )
 
-        # 4. 测量偏差 vs 时间
+        # 4. 测量偏差/残差 vs 时间
         if plot_time and time_col and time_col in data.columns and save_dir and not compute_stats_only:
             self._plot_delta_vs_time(
                 data=data,
                 delta_col=delta_col,
                 time_col=time_col,
-                save_path=os.path.join(save_dir, "delta_vs_time.png"),
-                title=f"{title_prefix} 测量偏差随时间变化",
+                save_path=os.path.join(save_dir, f"{file_prefix}_vs_time.png"),
+                title=f"{title_prefix} {time_label}",
                 sample_n=sample_for_scatter,
                 random_state=random_state,
             )

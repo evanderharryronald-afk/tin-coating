@@ -215,24 +215,34 @@ class ModelInterpreter:
             print("[警告] 未安装 shap，跳过 SHAP 分析")
             return None
 
-        print("\n[ModelInterpreter] 正在计算 SHAP 值 ...")
-        explainer, shap_values = self._get_shap_explainer_and_values()
+        try:
+            print("\n[ModelInterpreter] 正在计算 SHAP 值 ...")
+            explainer, shap_values = self._get_shap_explainer_and_values()
 
-        plt.figure()
-        shap.summary_plot(
-            shap_values,
-            self._X_shap,
-            feature_names=self.feature_names,
-            plot_type=plot_type,
-            max_display=max_display,
-            show=False,
-        )
-        plt.tight_layout()
-        path = os.path.join(self.save_dir, f"shap_summary_{plot_type}.png")
-        plt.savefig(path, dpi=300, bbox_inches="tight")
-        plt.close()
-        print(f"[图表保存] SHAP Summary ({plot_type}) → {path}")
-        return shap_values
+            plt.figure()
+            shap.summary_plot(
+                shap_values,
+                self._X_shap,
+                feature_names=self.feature_names,
+                plot_type=plot_type,
+                max_display=max_display,
+                show=False,
+            )
+            plt.tight_layout()
+            path = os.path.join(self.save_dir, f"shap_summary_{plot_type}.png")
+            plt.savefig(path, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"[图表保存] SHAP Summary ({plot_type}) → {path}")
+            return shap_values
+        except Exception as e:
+            print(f"[错误] SHAP Summary ({plot_type}) 生成失败: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                plt.close()
+            except:
+                pass
+            return None
 
     def shap_dependence(
         self,
@@ -243,32 +253,44 @@ class ModelInterpreter:
         if not HAS_SHAP:
             return
 
-        explainer, shap_values = self._get_shap_explainer_and_values()
+        try:
+            explainer, shap_values = self._get_shap_explainer_and_values()
 
-        if features is None:
-            # 默认画重要性最高的前几个
-            mean_abs = np.abs(shap_values).mean(axis=0)
-            top_idx = np.argsort(mean_abs)[::-1][:min(4, len(self.feature_names))]
-            features = [self.feature_names[i] for i in top_idx]
+            if features is None:
+                # 默认画重要性最高的前几个
+                # 注意：shap_values 是基于 self._X_shap 计算的，索引对应 self._X_shap 的列
+                mean_abs = np.abs(shap_values).mean(axis=0)
+                top_idx = np.argsort(mean_abs)[::-1][:min(4, len(self.feature_names))]
+                features = [self.feature_names[i] for i in top_idx]
 
-        for feat in features:
-            if feat not in self.feature_names:
-                continue
-            plt.figure()
-            shap.dependence_plot(
-                feat,
-                shap_values,
-                self._X_shap,
-                feature_names=self.feature_names,
-                interaction_index=interaction_idx,
-                show=False,
-            )
-            plt.tight_layout()
-            safe_name = feat.replace("/", "_").replace("[", "").replace("]", "")
-            path = os.path.join(self.save_dir, f"shap_dependence_{safe_name}.png")
-            plt.savefig(path, dpi=300, bbox_inches="tight")
-            plt.close()
-            print(f"[图表保存] SHAP Dependence ({feat}) → {path}")
+            for feat in features:
+                if feat not in self.feature_names:
+                    print(f"[警告] 特征 {feat} 不在特征列表中，跳过")
+                    continue
+                
+                try:
+                    plt.figure()
+                    shap.dependence_plot(
+                        feat,
+                        shap_values,
+                        self._X_shap,  # 与SHAP值保持一致，使用采样后的数据
+                        feature_names=self.feature_names,
+                        interaction_index=interaction_idx,
+                        show=False,
+                    )
+                    plt.tight_layout()
+                    safe_name = feat.replace("/", "_").replace("[", "").replace("]", "")
+                    path = os.path.join(self.save_dir, f"shap_dependence_{safe_name}.png")
+                    plt.savefig(path, dpi=300, bbox_inches="tight")
+                    plt.close()
+                    print(f"[图表保存] SHAP Dependence ({feat}) → {path}")
+                except Exception as e:
+                    print(f"[警告] 特征 {feat} 的 SHAP 依赖图生成失败: {e}")
+                    plt.close()
+                    continue
+        except Exception as e:
+            print(f"[错误] SHAP 依赖图分析失败: {e}")
+            return
 
     def shap_bar(self, max_display: int = 15):
         """SHAP 平均绝对贡献条形图（更简洁的全局重要性）"""
@@ -287,49 +309,73 @@ class ModelInterpreter:
         """
         绘制 PDP / ICE 图
         kind='both' 时同时显示平均 PDP 和个体 ICE 曲线
+        
+        注意：PDP 使用与 SHAP 相同的采样数据（self._X_shap）以保证分析一致性
         """
-        print("\n[ModelInterpreter] 正在计算 Partial Dependence ...")
+        try:
+            print("\n[ModelInterpreter] 正在计算 Partial Dependence ...")
 
-        if features is None:
-            # 默认取前几个数值特征
-            features = list(range(min(4, len(self.feature_names))))
+            # 先确保 SHAP 值已计算（会创建 self._X_shap）
+            if self._X_shap is None:
+                self._get_shap_explainer_and_values()
 
-        # 转换为索引
-        feature_indices = []
-        for f in features:
-            if isinstance(f, str):
-                feature_indices.append(self.feature_names.index(f))
-            else:
-                feature_indices.append(f)
+            if features is None:
+                # 默认取前几个数值特征
+                features = list(range(min(4, len(self.feature_names))))
 
-        n_feats = len(feature_indices)
-        n_rows = (n_feats + n_cols - 1) // n_cols
+            # 转换为索引
+            feature_indices = []
+            for f in features:
+                if isinstance(f, str):
+                    if f not in self.feature_names:
+                        print(f"[警告] 特征 {f} 不在特征列表中，跳过")
+                        continue
+                    feature_indices.append(self.feature_names.index(f))
+                else:
+                    if f >= len(self.feature_names):
+                        print(f"[警告] 特征索引 {f} 超出范围，跳过")
+                        continue
+                    feature_indices.append(f)
 
-        fig, ax = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-        if n_feats == 1:
-            ax = np.array([ax])
-        ax = ax.flatten()
+            if len(feature_indices) == 0:
+                print("[警告] 没有有效的特征用于 PDP 分析")
+                return None
 
-        display = PartialDependenceDisplay.from_estimator(
-            self.estimator,
-            self.X,
-            features=feature_indices,
-            kind=kind,
-            grid_resolution=grid_resolution,
-            ax=ax[:n_feats],
-            n_cols=n_cols,
-        )
+            n_feats = len(feature_indices)
+            n_rows = (n_feats + n_cols - 1) // n_cols
 
-        for i in range(n_feats, len(ax)):
-            ax[i].set_visible(False)
+            fig, ax = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+            if n_feats == 1:
+                ax = np.array([ax])
+            ax = ax.flatten()
 
-        fig.suptitle("Partial Dependence / ICE", fontsize=14)
-        plt.tight_layout()
-        path = os.path.join(self.save_dir, f"partial_dependence_{kind}.png")
-        plt.savefig(path, dpi=300, bbox_inches="tight")
-        plt.close()
-        print(f"[图表保存] Partial Dependence ({kind}) → {path}")
-        return display
+            # 使用采样后的数据 self._X_shap 而不是全量数据 self.X
+            # 这样 PDP 和 SHAP 分析基于相同的数据分布
+            display = PartialDependenceDisplay.from_estimator(
+                self.estimator,
+                self._X_shap,  # 与SHAP分析一致，使用采样后的数据
+                features=feature_indices,
+                kind=kind,
+                grid_resolution=grid_resolution,
+                ax=ax[:n_feats],
+                n_cols=n_cols,
+            )
+
+            for i in range(n_feats, len(ax)):
+                ax[i].set_visible(False)
+
+            fig.suptitle("Partial Dependence / ICE", fontsize=14)
+            plt.tight_layout()
+            path = os.path.join(self.save_dir, f"partial_dependence_{kind}.png")
+            plt.savefig(path, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"[图表保存] Partial Dependence ({kind}) → {path}")
+            return display
+        except Exception as e:
+            print(f"[错误] Partial Dependence 分析失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     # ------------------------------------------------------------------
     # 4. 一键完整分析
@@ -345,25 +391,68 @@ class ModelInterpreter:
     ) -> Dict[str, Any]:
         """
         一键运行常用解释分析，返回结果字典
+        
+        各个分析的执行顺序和容错机制：
+        1. Permutation Importance - 失败则警告但继续
+        2. SHAP Summary - 失败则警告但继续
+        3. SHAP Bar - 失败则警告但继续
+        4. SHAP Dependence - 失败则警告但继续
+        5. Partial Dependence - 失败则警告但继续
+        
+        确保单个分析失败不会中断整个流程
         """
         results = {}
 
+        # 1. Permutation Importance
         if run_permutation:
-            if y is None:
-                print("[警告] 未提供 y，跳过 Permutation Importance")
-            else:
-                results["permutation"] = self.permutation_importance(y)
+            try:
+                if y is None:
+                    print("[警告] 未提供 y，跳过 Permutation Importance")
+                else:
+                    results["permutation"] = self.permutation_importance(y)
+                    print("[✓] Permutation Importance 分析完成")
+            except Exception as e:
+                print(f"[警告] Permutation Importance 分析失败（非致命）: {e}")
+                pass
 
+        # 2. SHAP Analysis (dot plot)
         if run_shap and HAS_SHAP:
-            results["shap_values"] = self.shap_summary(plot_type="dot")
-            self.shap_bar()
-            self.shap_dependence(features=shap_dependence_features)
+            try:
+                results["shap_values"] = self.shap_summary(plot_type="dot")
+                print("[✓] SHAP Summary (dot) 分析完成")
+            except Exception as e:
+                print(f"[警告] SHAP Summary (dot) 分析失败（非致命）: {e}")
+                pass
 
+            # 3. SHAP Bar plot
+            try:
+                self.shap_bar()
+                print("[✓] SHAP Bar 分析完成")
+            except Exception as e:
+                print(f"[警告] SHAP Bar 分析失败（非致命）: {e}")
+                pass
+
+            # 4. SHAP Dependence
+            try:
+                self.shap_dependence(features=shap_dependence_features)
+                print("[✓] SHAP Dependence 分析完成")
+            except Exception as e:
+                print(f"[警告] SHAP Dependence 分析失败（非致命）: {e}")
+                pass
+        elif run_shap and not HAS_SHAP:
+            print("[警告] 未安装 shap，跳过 SHAP 分析")
+
+        # 5. Partial Dependence
         if run_pdp:
-            results["pdp"] = self.partial_dependence(
-                features=pdp_features,
-                kind="both"          # 同时看平均效应和个体曲线
-            )
+            try:
+                results["pdp"] = self.partial_dependence(
+                    features=pdp_features,
+                    kind="both"          # 同时看平均效应和个体曲线
+                )
+                print("[✓] Partial Dependence 分析完成")
+            except Exception as e:
+                print(f"[警告] Partial Dependence 分析失败（非致命）: {e}")
+                pass
 
         print(f"\n[ModelInterpreter] 全部分析完成，结果已保存至: {self.save_dir}")
         return results

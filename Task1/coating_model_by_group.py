@@ -153,7 +153,7 @@ def check_residual_distribution(df, group_tag=""):
     """单独排查数据集残差分布状况的辅助函数"""
     tag_display = f"[{group_tag}] " if group_tag else ""
     print("\n==========================================")
-    print(f"      【{tag_display}数据集中原始残差方向分布诊断】       ")
+    print(f"      【{tag_display}数据集中测量误差Delta方向分布诊断】       ")
     print("==========================================")
     for surface in ['Top', 'Bot']:
         surface_cn = '上' if surface == 'Top' else '下'
@@ -899,6 +899,13 @@ def get_feature_cols(surface: str) -> list:
 # ==========================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="镀层重量分规格组模型训练脚本")
+    # parser.add_argument(                                           ## 只针对Top2.799_Bot2.799进行分析
+    #     "--config", type=str, default="group_params_2_799_only.json",
+    #     help="配置文件 JSON 路径 (默认: group_params_2_799_only.json)"
+    # )
+    # ==========================================
+    # 6.1 所有规格组使用相同超参数，即对Top2.799_Bot2.799最优的超参数
+    # ==========================================
     # parser.add_argument(                                           ## 所有组都使用同样的超参数，即对Top2.799_Bot2.799最优的超参数
     #     "--config", type=str, default="group_params_all_the_same.json",
     #     help="配置文件 JSON 路径 (默认: group_params_all_the_same.json)"
@@ -907,22 +914,26 @@ if __name__ == "__main__":
     #     "--config", type=str, default="group_params_all_the_same_2.json",
     #     help="配置文件 JSON 路径 (默认: group_params_all_the_same_2.json)"
     # )
-    parser.add_argument(                                           ## 所有组都使用同样的超参数，即对Top2.799_Bot2.799最优的超参数
-        "--config", type=str, default="group_params_2_799_only.json",
-        help="配置文件 JSON 路径 (默认: group_params_2_799_only.json)"
-    )
     # parser.add_argument(                                           ## 所有组都使用同样的超参数，即对Top2.799_Bot2.799最优的超参数
     #     "--config", type=str, default="group_params_all_the_same_3.json",
     #     help="配置文件 JSON 路径 (默认: group_params_all_the_same_3.json)"
     # )
+
+    # ==========================================
+    # 6.2 各规格组使用独立搜索出来的超参数
+    # ==========================================
     # parser.add_argument(
     #     "--config", type=str, default="group_params_optimum_for_each.json",  ## 使用Optuna对各组搜索出来的最优的超参数
     #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each.json)"
     # )
     # parser.add_argument(
-    #     "--config", type=str, default="group_params_optimum_for_each_optimal.json",  ## 使用Optuna对各组搜索出来的最优的超参数
-    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_optimal.json)"
+    #     "--config", type=str, default="group_params_optimum_for_each_2.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+    #     help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_2.json)"
     # )
+    parser.add_argument(
+        "--config", type=str, default="group_params_optimum_for_each_3.json",  ## 使用Optuna对各组搜索出来的最优的超参数
+        help="配置文件 JSON 路径 (默认: group_params_optimum_for_each_3.json)"
+    )
 
     args = parser.parse_args()
 
@@ -1004,12 +1015,12 @@ if __name__ == "__main__":
         lambda s: '建模' if s >= MIN_GROUP_SAMPLES else '跳过'
     )
 
-    report_path = "result/grouped_by_coating_weight/summary_report_group_params_2_799_only.xlsx"
+    # report_path = "result/grouped_by_coating_weight/summary_report_group_params_2_799_only.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_all_the_same_3.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_all_the_same.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each.xlsx"
     # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_2.xlsx"
-    # report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_3.xlsx"
+    report_path = "result/grouped_by_coating_weight/summary_report_group_optimum_for_each_3.xlsx"
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with pd.ExcelWriter(report_path, engine='openpyxl') as writer:

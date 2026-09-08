@@ -318,6 +318,120 @@ class SurfaceCorrelationAnalyzer:
 
         return result
 
+    def analyze_custom_features(
+            self,
+            df,
+            target_col,  # 目标列（如 GALV_WEIGHT_TOP_ACT）
+            feature_cols,  # 特征列列表（如 ['GALV_EFF_TOP', 'GALV_MAX_CUR_DEN_TOP']）
+            title_prefix="上表面",
+            save_dir=None,
+            corr_method='both',
+            compute_mi=True,
+            compute_dcor=True,
+            mi_random_state=42
+    ):
+        """
+        纯粹的定制相关性分析：只针对传入的 target_col 和 feature_cols 进行计算，不做任何外部强绑定。
+        """
+        out_dir = save_dir if save_dir is not None else self.default_save_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        cols_to_use = [target_col] + [c for c in feature_cols if c != target_col]
+        existing_cols = [c for c in cols_to_use if c in df.columns]
+
+        if len(existing_cols) < 2:
+            raise ValueError(f"指定的列在数据集中匹配不足（需至少包含目标列和一个特征列）：{cols_to_use}")
+
+        # 统一去缺失
+        data = df[existing_cols].dropna()
+        result = {}
+
+        # ====================== 1. 相关性分析 (Pearson / Spearman) ======================
+        methods = ['pearson', 'spearman'] if corr_method == 'both' else [corr_method]
+
+        for method in methods:
+            corr_matrix = data.corr(method=method)
+
+            # 按与目标列的相关性绝对值降序排列
+            if target_col in corr_matrix.columns:
+                order = corr_matrix[target_col].abs().sort_values(ascending=False).index.tolist()
+                corr_matrix = corr_matrix.loc[order, order]
+
+            result[f'corr_{method}'] = corr_matrix
+
+            print(f"\n======== 【{title_prefix} {method.upper()} 相关性矩阵（目标: {target_col}）】 ========")
+            print(corr_matrix[target_col].sort_values(ascending=False))
+
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(
+                corr_matrix,
+                annot=True,
+                cmap='coolwarm',
+                fmt=".2f",
+                vmin=-1,
+                vmax=1,
+                square=True
+            )
+            plt.title(f'{title_prefix} {method.upper()} 相关性热力图')
+            plt.tight_layout()
+
+            save_img_path = os.path.join(out_dir, f"correlation_{title_prefix}_{method}.png")
+            plt.savefig(save_img_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[图表保存] {save_img_path}")
+
+        # ====================== 2. Mutual Information (互信息) ======================
+        if compute_mi and target_col in data.columns:
+            X = data[feature_cols]
+            y = data[target_col]
+
+            mi_scores = mutual_info_regression(X, y, random_state=mi_random_state)
+            mi_series = pd.Series(mi_scores, index=feature_cols).sort_values(ascending=False)
+            result['mi'] = mi_series
+
+            print(f"\n======== 【{title_prefix} Mutual Information（目标: {target_col}）】 ========")
+            print(mi_series)
+
+            plt.figure(figsize=(6, max(3, len(mi_series) * 0.5)))
+            mi_series.sort_values().plot(kind='barh', color='steelblue')
+            plt.xlabel('Mutual Information')
+            plt.title(f'{title_prefix} 特征对 {target_col} 的 互信息')
+            plt.tight_layout()
+
+            save_mi_path = os.path.join(out_dir, f"mi_importance_{title_prefix}.png")
+            plt.savefig(save_mi_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        # ====================== 3. Distance Correlation (距离相关性) ======================
+        if compute_dcor and target_col in data.columns:
+            dcor_scores = {}
+            y_val = data[target_col].values.astype(float)
+
+            for col in feature_cols:
+                x_val = data[col].values.astype(float)
+                if np.std(x_val) < 1e-10:
+                    dcor_scores[col] = 0.0
+                else:
+                    dcor_scores[col] = dcor.distance_correlation(x_val, y_val)
+
+            dcor_series = pd.Series(dcor_scores).sort_values(ascending=False)
+            result['dcor'] = dcor_series
+
+            print(f"\n======== 【{title_prefix} 距离相关性（目标: {target_col}）】 ========")
+            print(dcor_series)
+
+            plt.figure(figsize=(6, max(3, len(dcor_series) * 0.5)))
+            dcor_series.sort_values().plot(kind='barh', color='darkorange')
+            plt.xlabel('Distance Correlation')
+            plt.title(f'{title_prefix} 特征对 {target_col} 的 距离相关性')
+            plt.tight_layout()
+
+            save_dcor_path = os.path.join(out_dir, f"dcor_importance_{title_prefix}.png")
+            plt.savefig(save_dcor_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        return result
+
 
 if __name__ == "__main__":
     # 延迟导入，避免与 coating_model_by_group 循环引用

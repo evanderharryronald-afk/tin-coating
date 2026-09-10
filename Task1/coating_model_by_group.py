@@ -998,7 +998,7 @@ if __name__ == "__main__":
     # 初始化EDA诊断管理器 (分组分析，配置文件是 eda_config_with_group.json)
 
     eda_mgr = None  #(对指定的规格组分析，配置文件是 eda_config_specific_group.json)
-    if os.path.exists('eda_config_specific_group.json'):
+    if os.path.exists('eda_config_specific_group_1.json'):
         with open('eda_config_specific_group.json', 'r', encoding='utf-8') as f:
             eda_config = json.load(f)
         eda_mgr = create_eda_diagnoser_from_config(eda_config)
@@ -1179,3 +1179,71 @@ if __name__ == "__main__":
             )
 
     print(f"[导出提示] 汇总报表已保存至: {report_path}")
+
+    # ========== 保存训练好的模型 ==========
+    print("\n==========================================")
+    print("       开始保存训练好的模型...")
+    print("==========================================")
+    
+    from model_persistence import ModelSaver, ModelMetadata
+    
+    saver = ModelSaver(base_dir="result/trained_models", compress=True)
+    
+    # 准备要保存的模型及其元数据
+    models_to_save = {}
+    
+    for group_label, group_size in group_sizes.items():
+        if group_size < MIN_GROUP_SAMPLES:
+            continue
+        
+        for surface in ['Top', 'Bot']:
+            key = (group_label, surface)
+            if key not in trained_models:
+                continue
+            
+            model = trained_models[key]
+            
+            # 获取对应的指标
+            metrics_for_this_model = None
+            for m in all_metrics:
+                if m.get('规格组') == group_label and m.get('表面') == surface:
+                    metrics_for_this_model = m
+                    break
+            
+            # 提取超参数（从配置或模型属性）
+            if surface == 'Top':
+                params = get_params_for_group(config, group_label, 'Top')
+            else:
+                params = get_params_for_group(config, group_label, 'Bot')
+            
+            # 创建元数据
+            feature_cols = get_feature_cols(surface)
+            metadata = ModelMetadata(
+                model_type=model.__class__.__name__,
+                surface=surface,
+                feature_names=feature_cols,
+                hyperparameters=params,
+                group_label=group_label,
+                training_samples=group_size,
+                training_metrics=dict(metrics_for_this_model) if metrics_for_this_model else {},
+                source_script="coating_model_by_group.py"
+            )
+            
+            models_to_save[(group_label, surface)] = (model, metadata)
+    
+    # 批量保存
+    save_results = saver.save_batch(models_to_save)
+    
+    # 打印保存结果摘要
+    success_count = sum(1 for r in save_results.values() if r.get('status') == 'success')
+    failed_count = sum(1 for r in save_results.values() if r.get('status') == 'failed')
+    
+    print(f"\n[保存摘要] 成功: {success_count}, 失败: {failed_count}")
+    
+    if failed_count > 0:
+        print("\n[保存失败详情]:")
+        for key, result in save_results.items():
+            if result.get('status') == 'failed':
+                print(f"  {key}: {result.get('error')}")
+    
+    print("==========================================\n")

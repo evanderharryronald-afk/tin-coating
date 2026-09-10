@@ -12,6 +12,7 @@ from sklearn.linear_model import Ridge, HuberRegressor
 from sklearn.metrics import mean_absolute_error
 from scipy import stats as scipy_stats
 from residual_diagnostics import run_full_residual_diagnostics
+from model_persistence import ModelSaver, ModelMetadata
 
 try:
     from model_interpreter import ModelInterpreter
@@ -213,6 +214,30 @@ def diagnose_residuals(
     }
 
     return bin_stats, summary_metrics
+
+
+# ==========================================
+# 3.6 获取表面对应的特征列
+# ==========================================
+def get_feature_cols_for_analysis(surface: str) -> list:
+    """
+    获取对应表面的特征列
+    与 coating_model_by_group.py 中的 get_feature_cols 逻辑一致
+    """
+    prefix = "Top" if surface == "Top" else "Bot"
+    speed_col = "Speed[m/min]_Process_Avg"
+    current_col = f"{prefix}_Current_Sum"
+    online_col = f'Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg'
+    return [
+        online_col,
+        current_col,
+        f'{prefix}_Current_Per_Speed',
+        f'{prefix}_Theoretical_Factor',
+        speed_col,
+        'Dimension_[mm]_Width',
+        'Dimension_[mm]_Thickness',
+        'Steel_Grade_Encoded'
+    ]
 
 
 # ==========================================
@@ -866,6 +891,78 @@ if __name__ == "__main__":
 
     # 【新增】统一导出多sheet Excel + 长格式CSV
     export_reports_to_excel([top_report, bot_report])
+
+    # ========== 保存训练好的模型 ==========
+    print("\n==========================================")
+    print("       开始保存训练好的模型 (整体模型)...")
+    print("==========================================")
+    
+
+    
+    saver = ModelSaver(base_dir="result/trained_models", compress=True)
+    
+    # 保存 Top 模型
+    # 将 report 转换为更简单的格式（避免 DataFrame 序列化问题）
+    top_metrics = {}
+    if isinstance(top_report, dict):
+        for key, value in top_report.items():
+            if isinstance(value, pd.DataFrame):
+                # DataFrame 只保存摘要信息
+                top_metrics[f"{key}_shape"] = list(value.shape)
+                if len(value) > 0:
+                    top_metrics[f"{key}_summary"] = value.iloc[0].to_dict() if len(value) > 0 else {}
+            elif isinstance(value, (dict, list)):
+                top_metrics[key] = value
+            else:
+                top_metrics[key] = str(value) if not isinstance(value, (int, float, bool, str)) else value
+    
+    top_metadata = ModelMetadata(
+        model_type=top_corrector.__class__.__name__,
+        surface='Top',
+        feature_names=get_feature_cols_for_analysis('Top'),
+        hyperparameters=top_params_optimized,
+        group_label=None,  # 整体模型
+        training_samples=len(featured_df),
+        training_metrics=top_metrics,
+        source_script="analyse_data_final.py"
+    )
+    
+    # 保存 Bot 模型
+    # 将 report 转换为更简单的格式（避免 DataFrame 序列化问题）
+    bot_metrics = {}
+    if isinstance(bot_report, dict):
+        for key, value in bot_report.items():
+            if isinstance(value, pd.DataFrame):
+                # DataFrame 只保存摘要信息
+                bot_metrics[f"{key}_shape"] = list(value.shape)
+                if len(value) > 0:
+                    bot_metrics[f"{key}_summary"] = value.iloc[0].to_dict() if len(value) > 0 else {}
+            elif isinstance(value, (dict, list)):
+                bot_metrics[key] = value
+            else:
+                bot_metrics[key] = str(value) if not isinstance(value, (int, float, bool, str)) else value
+    
+    bot_metadata = ModelMetadata(
+        model_type=bot_corrector.__class__.__name__,
+        surface='Bot',
+        feature_names=get_feature_cols_for_analysis('Bot'),
+        hyperparameters=bot_params,
+        group_label=None,  # 整体模型
+        training_samples=len(featured_df),
+        training_metrics=bot_metrics,
+        source_script="analyse_data_final.py"
+    )
+    
+    try:
+        saver.save_model(top_corrector, top_metadata, surface='Top')
+        saver.save_model(bot_corrector, bot_metadata, surface='Bot')
+        print("\n[✓] 整体模型保存完成")
+    except Exception as e:
+        print(f"\n[✗] 模型保存失败: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("==========================================\n")
 
     # # -------------------------------------------------------------
     # # 方式 B：直接用关键字参数修改

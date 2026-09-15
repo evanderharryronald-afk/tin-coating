@@ -41,7 +41,7 @@ df_new = pd.read_excel(input_file, header=1)
 
 # 3. 构建新列名 -> 旧列名的“翻译”字典
 column_mapping = {
-    'PCOIL_SID': 'Coil ID',
+    'MAT_IDENT': 'Coil ID',
     'PROD_STEELGRADE': 'Steel Grade',
     'PROD_TIME_END': 'Produce Time',
     'THICKNESS': 'Dimension_[mm]_Thickness',
@@ -65,8 +65,10 @@ for i in range(1, 37):
 # 4. 执行“翻译”（重命名列名）
 df_translated = df_new.rename(columns=column_mapping)
 
-# 5. 处理格式：对新数据中不存在但旧表要求的列补空，并重新按照旧表的标准列顺序排序
-df_final = df_translated.reindex(columns=OLD_FORMAT_COLUMNS)
+# 5. 处理格式：先按旧表标准列顺序排列，再追加新数据中多余的列
+extra_columns = [col for col in df_translated.columns if col not in OLD_FORMAT_COLUMNS]
+final_columns = OLD_FORMAT_COLUMNS + extra_columns
+df_final = df_translated.reindex(columns=final_columns)
 
 # 6. 保存导出为旧格式 Excel
 df_final.to_excel(output_file, index=False)

@@ -1,133 +1,257 @@
-# ═══════════════════════════════════════════════════════════════
-#  merge_tool / config.yaml
-#  修改此文件，然后运行 python run_merge.py 即可。
-# ═══════════════════════════════════════════════════════════════
+version: "2.0"
+description: "电镀锡生产数据清洗和特征工程配置"
 
-# ── 主表配置 ────────────────────────────────────────────────────
-master:
-  filename: "ProdcoilDataSReport.xlsx"
-  search_root: 'data\ETL1 Data\ETL1 25.6-26.6'
-  search_pattern: '*/ProdcoilDataSReport.xlsx'   # * 匹配一级子目录，** 匹配任意深度
+# ============================================
+# 数据清洗配置
+# ============================================
+data_cleaning:
+  rule_sets:
+    old_data:
+      description: "旧数据（202601-202604）清洗规则集"
+      version: "1.0"
+      rules:
+        - name: "required_fields_check"
+          type: "required_fields"
+          fields:
+            - "Speed[m/min]_Process_Avg"
+            - "Dimension_[mm]_Width"
+            - "Dimension_[mm]_Thickness"
+            - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+            - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+            - "上表面镀层重量A(XA1_0)"
+            - "下表面镀层重量A(XA1_0)"
+          active: true
+          reason: "关键工艺/测量参数缺失"
+          skip_if_missing: []
 
-  # 主表表头行范围和数据起始行（行号从 1 开始计数）
-  header_row_start: 11
-  header_row_end: 14
-  data_start_row: 15
+        - name: "low_speed_check"
+          type: "threshold"
+          field: "Speed[m/min]_Process_Avg"
+          operator: "<="
+          threshold: 20.0
+          active: true
+          reason: "车速低于20m/min(停机或过渡区)"
 
-  # 需要保留的列，用 Excel 列字母表示（不区分大小写）。
-  keep_columns:
-    - "E"    # Coil ID
-    - "F"    # Steel Grade
-    - "H"    # Produce Time
-    - "P"    # Dimension_[mm]_Thickness
-    - "Q"    # Dimension_[mm]_Width
-    - "S"    # Dimension_[mm]_Length
-    - "AL"   # Process_Avg
-    - "KN"   # GL_1_Avg
-    - "KS"   # GL_2_Avg
-    - "KW"   # GL_3_Avg
-    - "LA"   # GL_4_Avg
-    - "LE"   # GL_5_Avg
-    - "LI"   # GL_6_Avg
-    - "LM"   # GL_7_Avg
-    - "LQ"   # GL_8_Avg
-    - "LU"   # GL_9_Avg
-    - "LY"   # GL_10_Avg
-    - "MC"   # GL_11_Avg
-    - "MG"   # GL_12_Avg
-    - "MK"   # GL_13_Avg
-    - "MO"   # GL_14_Avg
-    - "MS"   # GL_15_Avg
-    - "MW"   # GL_16_Avg
-    - "NA"   # GL_17_Avg
-    - "NE"   # GL_18_Avg
-    - "NI"   # GL_19_Avg
-    - "NM"   # GL_20_Avg
-    - "NQ"   # GL_21_Avg
-    - "NU"   # GL_22_Avg
-    - "NY"   # GL_23_Avg
-    - "OC"   # GL_24_Avg
-    - "OG"   # GL_25_Avg
-    - "OK"   # GL_26_Avg
-    - "OO"   # GL_27_Avg
-    - "OS"   # GL_28_Avg
-    - "OW"   # GL_29_Avg
-    - "PA"   # GL_30_Avg
-    - "PE"   # GL_31_Avg
-    - "PI"   # GL_32_Avg
-    - "PM"   # GL_33_Avg
-    - "PR"   # GL_34_Avg
-    - "PW"   # GL_35_Avg
-    - "QA"   # GL_36_Avg
-    - "RX"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Avg
-    - "SA"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Max
-    - "SB"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min
-    - "SD"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Avg
-    - "SE"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Max
-    - "SF"   # Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min
-    - "SI"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg
-    - "SK"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max
-    - "SL"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min
-    - "SN"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg
-    - "SO"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max
-    - "SP"   # Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min
+        - name: "zero_value_check"
+          type: "zero_value"
+          check_pairs:
+            - field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min"
+              surface: "上表面"
+            - field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min"
+              surface: "下表面"
+          active: true
+          reason: "仪表零值/死值异常"
 
-# ── 副表配置（列表，支持多副表，按顺序依次合并）──────────────────
-sub_tables:
+        - name: "instability_check"
+          type: "instability"
+          pairs:
+            - avg_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+              min_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min"
+              max_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max"
+              surface: "上表面"
+            - avg_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+              min_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min"
+              max_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max"
+              surface: "下表面"
+          max_range_abs: 0.5
+          max_range_ratio: 0.4
+          active: true
+          reason: "在线仪表波动过大(Max/Min极差超标)"
 
-  - path: 'data\Analysis Center Data\25.6-26.6分析中心检测值.csv'    # 副表文件路径
+        - name: "residual_mad_check"
+          type: "mad_based"
+          depends_on: ["required_fields_check", "low_speed_check", "zero_value_check", "instability_check"]
+          residual_pairs:
+            - measurement: "上表面镀层重量A(XA1_0)"
+              online: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+              surface: "上表面"
+            - measurement: "下表面镀层重量A(XA1_0)"
+              online: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+              surface: "下表面"
+          mad_factor: 3.0
+          active: true
+          reason: "残差异常(MAD-based离群检测)"
 
-    # 关键字段配置
-    join_key:
-      master_col: "E"           # 主表关键字段的列字母（对应 Coil ID）
-      sub_col:    "出口材料号(XA1)"      # 副表关键字段的列名
-      unmatched:  "drop"        # 主表行在副表无匹配时的处理：drop=删除该行；keep=保留填空值（默认）
-      all_null:   "drop"        # 匹配到但副表保留列全为空时的处理：drop=删除；keep=保留（默认）
+    new_data:
+      description: "新数据（202607-202608）清洗规则集"
+      version: "1.0"
+      rules:
+        - name: "required_fields_check"
+          type: "required_fields"
+          fields:
+            - "Speed[m/min]_Process_Avg"
+            - "Dimension_[mm]_Width"
+            - "Dimension_[mm]_Thickness"
+            - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+            - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+          active: true
+          reason: "关键工艺参数缺失"
+          skip_if_missing: ["上表面镀层重量A(XA1_0)", "下表面镀层重量A(XA1_0)"]
 
-      # 【新增字段】特定列为空剔除行逻辑。
-      # 列表中指定的副表列，只要有任意一列在聚合后为空值(None/NaN)，就自动剔除整行。
-      required_columns:
-        - "上表面镀层重量A(XA1_0)"  # Average 均值
-#        - "上表面镀层重量C(XA1_0)" # Center 中心侧
-#        - "上表面镀层重量D(XA1_0)" # Drive 驱动侧
-#        - "上表面镀层重量W(XA1_0)" # Work 操作侧
-#        - "下表面镀层重量A(XA1_0)"
-#        - "下表面镀层重量C(XA1_0)"
-#        - "下表面镀层重量D(XA1_0)"
-#        - "下表面镀层重量W(XA1_0)"
+        - name: "low_speed_check"
+          type: "threshold"
+          field: "Speed[m/min]_Process_Avg"
+          operator: "<="
+          threshold: 20.0
+          active: true
+          reason: "车速低于20m/min(停机或过渡区)"
 
-    # 副表需要保留的列及其合并策略
-    keep_columns:
-      - col: "上表面镀层重量A(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层重量C(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层重量D(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层重量W(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量A(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量C(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量D(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量W(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层标准重量(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层重量_最大(XA1_0)"
-        strategy: mean
-      - col: "上表面镀层重量_最小(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层标准重量(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量_最大(XA1_0)"
-        strategy: mean
-      - col: "下表面镀层重量_最小(XA1_0)"
-        strategy: mean
+        - name: "zero_value_check"
+          type: "zero_value"
+          check_pairs:
+            - field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min"
+              surface: "上表面"
+            - field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min"
+              surface: "下表面"
+          active: true
+          reason: "仪表零值/死值异常"
 
-# ── 输出配置 ────────────────────────────────────────────────────
-output:
-  path: 'result/data/merged_data/merged_result_latest.xlsx'    # 输出文件路径
-  sheet_name: "Result"          # 输出 Sheet 名称
+        - name: "instability_check"
+          type: "instability"
+          pairs:
+            - avg_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+              min_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Min"
+              max_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Max"
+              surface: "上表面"
+            - avg_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+              min_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Min"
+              max_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Max"
+              surface: "下表面"
+          max_range_abs: 0.5
+          max_range_ratio: 0.4
+          active: true
+          reason: "在线仪表波动过大(Max/Min极差超标)"
+
+        # ✨ 新数据特有规则（默认禁用，需要时启用）
+        - name: "galv_efficiency_top_check"
+          type: "range"
+          field: "GALV_EFF_TOP"
+          min: 0.8
+          max: 1.2
+          operator: "outside"
+          active: false
+          reason: "上表面电镀效率超出正常范围"
+
+        - name: "galv_efficiency_bot_check"
+          type: "range"
+          field: "GALV_EFF_BOT"
+          min: 0.8
+          max: 1.2
+          operator: "outside"
+          active: false
+          reason: "下表面电镀效率超出正常范围"
+
+        - name: "current_density_top_check"
+          type: "range"
+          field: "GALV_MAX_CUR_DEN_TOP"
+          min: 0
+          max: 1000
+          operator: "outside"
+          active: false
+          reason: "上表面电流密度超出范围"
+
+        - name: "current_density_bot_check"
+          type: "range"
+          field: "GALV_MAX_CUR_DEN_BOT"
+          min: 0
+          max: 1000
+          operator: "outside"
+          active: false
+          reason: "下表面电流密度超出范围"
+
+# ============================================
+# 特征工程配置
+# ============================================
+feature_engineering:
+  feature_groups:
+    electrical:
+      enabled: true
+      description: "电流聚合特征"
+      bot_current_indices: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35]
+      top_current_indices: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36]
+      output_features:
+        - "Bot_Current_Sum"
+        - "Top_Current_Sum"
+
+    physical:
+      enabled: true
+      description: "物理因子特征"
+      speed_col: "Speed[m/min]_Process_Avg"
+      width_col: "Dimension_[mm]_Width"
+      thickness_col: "Dimension_[mm]_Thickness"
+      eps: 1.0e-5
+      output_features:
+        - "Top_Current_Per_Speed"
+        - "Bot_Current_Per_Speed"
+        - "Top_Theoretical_Factor"
+        - "Bot_Theoretical_Factor"
+        - "Width_m"
+
+    residuals:
+      enabled: true
+      description: "残差特征（仅旧数据有实验室测量值）"
+      pairs:
+        - measurement_col: "上表面镀层重量A(XA1_0)"
+          online_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+          delta_output: "Top_Delta"
+          centered_output: "Top_Delta_Centered"
+          surface: "Top"
+        - measurement_col: "下表面镀层重量A(XA1_0)"
+          online_col: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+          delta_output: "Bot_Delta"
+          centered_output: "Bot_Delta_Centered"
+          surface: "Bot"
+      skip_if_missing: true
+      output_features:
+        - "Top_Delta"
+        - "Bot_Delta"
+        - "Top_Delta_Centered"
+        - "Bot_Delta_Centered"
+
+    encoding:
+      enabled: true
+      description: "分类特征编码"
+      steel_grade_col: "Steel Grade"
+      encoding_type: "frequency"
+      output_features:
+        - "Steel_Grade_Encoded"
+
+    new_metrics:
+      enabled: true
+      description: "新数据特有的指标（passthrough）"
+      metrics:
+        - name: "GALV_EFF_TOP"
+          source_col: "GALV_EFF_TOP"
+          type: "passthrough"
+          required: false
+        - name: "GALV_EFF_BOT"
+          source_col: "GALV_EFF_BOT"
+          type: "passthrough"
+          required: false
+        - name: "GALV_MAX_CUR_DEN_TOP"
+          source_col: "GALV_MAX_CUR_DEN_TOP"
+          type: "passthrough"
+          required: false
+        - name: "GALV_MAX_CUR_DEN_BOT"
+          source_col: "GALV_MAX_CUR_DEN_BOT"
+          type: "passthrough"
+          required: false
+
+  # 核心必需特征（任何情况下都必须生成，否则后续模块崩溃）
+  required_features:
+    - "Top_Current_Sum"
+    - "Bot_Current_Sum"
+    - "Top_Current_Per_Speed"
+    - "Bot_Current_Per_Speed"
+    - "Top_Theoretical_Factor"
+    - "Bot_Theoretical_Factor"
+    - "Steel_Grade_Encoded"
+
+  # 启用的特征组顺序（重要：某些特征依赖前面的计算结果）
+  enabled_groups: ["electrical", "physical", "encoding", "residuals", "new_metrics"]
+
+  # 特征输出行为
+  output_behavior:
+    drop_intermediate: false
+    na_strategy: "keep"
+    duplicate_cols: "keep_first"

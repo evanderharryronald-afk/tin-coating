@@ -328,7 +328,8 @@ class SurfaceCorrelationAnalyzer:
             corr_method='both',
             compute_mi=True,
             compute_dcor=True,
-            mi_random_state=42
+            mi_random_state=42,
+            plot_heatmap=False  # 是否输出热力图（特征多时建议关闭）
     ):
         """
         纯粹的定制相关性分析：只针对传入的 target_col 和 feature_cols 进行计算，不做任何外部强绑定。
@@ -362,17 +363,29 @@ class SurfaceCorrelationAnalyzer:
             print(f"\n======== 【{title_prefix} {method.upper()} 相关性矩阵（目标: {target_col}）】 ========")
             print(corr_matrix[target_col].sort_values(ascending=False))
 
-            plt.figure(figsize=(6, 5))
-            sns.heatmap(
+            # 热力图：根据特征数动态调整大小和字体
+            n_features = len(corr_matrix)
+            fig_size = (max(8, n_features * 0.6), max(8, n_features * 0.6))
+            font_size = max(6, 12 - n_features * 0.2)
+            
+            plt.figure(figsize=fig_size, dpi=100)
+            ax = sns.heatmap(
                 corr_matrix,
                 annot=True,
                 cmap='coolwarm',
                 fmt=".2f",
                 vmin=-1,
                 vmax=1,
-                square=True
+                square=True,
+                cbar_kws={'shrink': 0.8},
+                annot_kws={'size': font_size}
             )
-            plt.title(f'{title_prefix} {method.upper()} 相关性热力图')
+            
+            # 旋转标签避免重叠
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=font_size)
+            ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=font_size)
+            
+            plt.title(f'{title_prefix} {method.upper()} 相关性热力图', fontsize=14, pad=20)
             plt.tight_layout()
 
             save_img_path = os.path.join(out_dir, f"correlation_{title_prefix}_{method}.png")

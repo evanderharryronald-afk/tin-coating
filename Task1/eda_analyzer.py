@@ -501,10 +501,18 @@ class SurfaceEDAAnalyzer:
         stats_dict: Dict = {}
         
         # 根据分析类型确定标签和文件名前缀
-        label_name = "模型残差(Residual)" if analysis_type == "residual" else "测量偏差(Delta)"
-        vs_label = "模型残差(Residual) vs" if analysis_type == "residual" else "测量偏差(Delta) vs"
-        time_label = "模型残差(Residual)随时间变化" if analysis_type == "residual" else "测量偏差(Delta)随时间变化"
-        file_prefix = "residual" if analysis_type == "residual" else "delta"
+        # 优先使用 delta_col 的实际列名作为标签
+        if analysis_type == "residual" or "Residual" in delta_col:
+            label_name = "模型残差(Residual)"
+            vs_label = "模型残差(Residual) vs"
+            time_label = "模型残差(Residual)随时间变化"
+            file_prefix = "residual"
+        else:
+            # 使用实际的 delta_col 列名作为标签
+            label_name = delta_col
+            vs_label = f"{delta_col} vs"
+            time_label = f"{delta_col}随时间变化"
+            file_prefix = self._safe_name(delta_col)
 
         # 1. 测量偏差/残差自身分布（始终算统计；按需画图）
         stats_dict["delta"] = self._describe_series(data[delta_col])

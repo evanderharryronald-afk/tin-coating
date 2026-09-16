@@ -159,6 +159,24 @@ data_cleaning:
           active: false
           reason: "下表面电流密度超出范围"
 
+        - name: "online_value_top_range_check"
+          type: "range"
+          field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+          min: 0.1
+          max: 50
+          operator: "outside"
+          active: true
+          reason: "上表面在线测量值超出正常范围（异常小或异常大）"
+
+        - name: "online_value_bot_range_check"
+          type: "range"
+          field: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+          min: 0.1
+          max: 50
+          operator: "outside"
+          active: true
+          reason: "下表面在线测量值超出正常范围（异常小或异常大）"
+
 # ============================================
 # 特征工程配置
 # ============================================

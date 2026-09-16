@@ -106,12 +106,13 @@ def process_new_data(raw_data_path: str, config: dict) -> tuple:
     return cleaned_df, featured_df
 
 
-def analyze_new_features(featured_df: pd.DataFrame) -> dict:
+def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel') -> dict:
     """
     对新数据的特征进行全面分析：旧特征、新特征、组合特征
     
     params:
     - featured_df: 特征工程后的数据
+    - save_matrices: 矩阵保存方式 ('excel'|'csv'|'both'|None) - 默认 'excel'
     
     returns:
     - analysis_results: 分析结果概览
@@ -168,7 +169,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
             save_dir="result/new_data/correlation_result/Top/Legacy",
             corr_method='both',
             compute_mi=True,
-            compute_dcor=True
+            compute_dcor=True,
+            save_matrices=save_matrices
         )
         analysis_results['correlation_analyses'].append({
             'surface': 'Top', 'type': 'legacy', 'status': 'completed'
@@ -192,7 +194,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
                 save_dir="result/new_data/correlation_result/Top/New",
                 corr_method='both',
                 compute_mi=True,
-                compute_dcor=True
+                compute_dcor=True,
+                save_matrices=save_matrices
             )
             analysis_results['correlation_analyses'].append({
                 'surface': 'Top', 'type': 'new', 'status': 'completed'
@@ -216,7 +219,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
                 save_dir="result/new_data/correlation_result/Top/Combined",
                 corr_method='both',
                 compute_mi=True,
-                compute_dcor=True
+                compute_dcor=True,
+                save_matrices=save_matrices
             )
             analysis_results['correlation_analyses'].append({
                 'surface': 'Top', 'type': 'combined', 'status': 'completed'
@@ -245,7 +249,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
             save_dir="result/new_data/correlation_result/Bot/Legacy",
             corr_method='both',
             compute_mi=True,
-            compute_dcor=True
+            compute_dcor=True,
+            save_matrices=save_matrices
         )
         analysis_results['correlation_analyses'].append({
             'surface': 'Bot', 'type': 'legacy', 'status': 'completed'
@@ -269,7 +274,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
                 save_dir="result/new_data/correlation_result/Bot/New",
                 corr_method='both',
                 compute_mi=True,
-                compute_dcor=True
+                compute_dcor=True,
+                save_matrices=save_matrices
             )
             analysis_results['correlation_analyses'].append({
                 'surface': 'Bot', 'type': 'new', 'status': 'completed'
@@ -293,7 +299,8 @@ def analyze_new_features(featured_df: pd.DataFrame) -> dict:
                 save_dir="result/new_data/correlation_result/Bot/Combined",
                 corr_method='both',
                 compute_mi=True,
-                compute_dcor=True
+                compute_dcor=True,
+                save_matrices=save_matrices
             )
             analysis_results['correlation_analyses'].append({
                 'surface': 'Bot', 'type': 'combined', 'status': 'completed'

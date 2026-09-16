@@ -1,5 +1,6 @@
 import os
 import argparse
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -329,10 +330,17 @@ class SurfaceCorrelationAnalyzer:
             compute_mi=True,
             compute_dcor=True,
             mi_random_state=42,
-            plot_heatmap=False  # 是否输出热力图（特征多时建议关闭）
+            plot_heatmap=False,  # 是否输出热力图（特征多时建议关闭）
+            save_matrices='excel'  # 保存选项：'excel' | 'csv' | 'both' | None（不保存）
     ):
         """
         纯粹的定制相关性分析：只针对传入的 target_col 和 feature_cols 进行计算，不做任何外部强绑定。
+        
+        :param save_matrices: 矩阵保存格式选择
+            - 'excel': 保存为单个 Excel 文件（多 sheet）
+            - 'csv': 保存为多个 CSV 文件
+            - 'both': 同时保存 Excel 和 CSV
+            - None: 不保存矩阵文件
         """
         out_dir = save_dir if save_dir is not None else self.default_save_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -346,6 +354,9 @@ class SurfaceCorrelationAnalyzer:
         # 统一去缺失
         data = df[existing_cols].dropna()
         result = {}
+        
+        # 用于 Excel 多 sheet 保存
+        excel_sheets = {}
 
         # ====================== 1. 相关性分析 (Pearson / Spearman) ======================
         methods = ['pearson', 'spearman'] if corr_method == 'both' else [corr_method]
@@ -362,6 +373,15 @@ class SurfaceCorrelationAnalyzer:
 
             print(f"\n======== 【{title_prefix} {method.upper()} 相关性矩阵（目标: {target_col}）】 ========")
             print(corr_matrix[target_col].sort_values(ascending=False))
+
+            # 保存相关性矩阵
+            if save_matrices in ['csv', 'both']:
+                save_corr_csv = os.path.join(out_dir, f"correlation_{title_prefix}_{method}.csv")
+                corr_matrix.to_csv(save_corr_csv)
+                print(f"[矩阵保存] {save_corr_csv}")
+            
+            if save_matrices in ['excel', 'both']:
+                excel_sheets[f'corr_{method}'] = corr_matrix
 
             # 热力图：根据特征数动态调整大小和字体
             n_features = len(corr_matrix)
@@ -405,6 +425,15 @@ class SurfaceCorrelationAnalyzer:
             print(f"\n======== 【{title_prefix} Mutual Information（目标: {target_col}）】 ========")
             print(mi_series)
 
+            # 保存互信息结果
+            if save_matrices in ['csv', 'both']:
+                save_mi_csv = os.path.join(out_dir, f"mi_importance_{title_prefix}.csv")
+                mi_series.to_csv(save_mi_csv)
+                print(f"[结果保存] {save_mi_csv}")
+            
+            if save_matrices in ['excel', 'both']:
+                excel_sheets[f'mi_{title_prefix}'] = mi_series.to_frame(name='MI_Score')
+
             plt.figure(figsize=(6, max(3, len(mi_series) * 0.5)))
             mi_series.sort_values().plot(kind='barh', color='steelblue')
             plt.xlabel('Mutual Information')
@@ -433,6 +462,15 @@ class SurfaceCorrelationAnalyzer:
             print(f"\n======== 【{title_prefix} 距离相关性（目标: {target_col}）】 ========")
             print(dcor_series)
 
+            # 保存距离相关性结果
+            if save_matrices in ['csv', 'both']:
+                save_dcor_csv = os.path.join(out_dir, f"dcor_importance_{title_prefix}.csv")
+                dcor_series.to_csv(save_dcor_csv)
+                print(f"[结果保存] {save_dcor_csv}")
+            
+            if save_matrices in ['excel', 'both']:
+                excel_sheets[f'dcor_{title_prefix}'] = dcor_series.to_frame(name='Distance_Correlation')
+
             plt.figure(figsize=(6, max(3, len(dcor_series) * 0.5)))
             dcor_series.sort_values().plot(kind='barh', color='darkorange')
             plt.xlabel('Distance Correlation')
@@ -442,6 +480,15 @@ class SurfaceCorrelationAnalyzer:
             save_dcor_path = os.path.join(out_dir, f"dcor_importance_{title_prefix}.png")
             plt.savefig(save_dcor_path, dpi=300, bbox_inches='tight')
             plt.close()
+
+        # ====================== Excel 多 sheet 保存 ======================
+        if save_matrices in ['excel', 'both'] and excel_sheets:
+            excel_path = os.path.join(out_dir, f"correlation_analysis_{title_prefix}.xlsx")
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                for sheet_name, df_data in excel_sheets.items():
+                    df_data.to_excel(writer, sheet_name=sheet_name)
+            print(f"[Excel 保存] {excel_path}")
+            print(f"  包含 sheet: {', '.join(excel_sheets.keys())}")
 
         return result
 

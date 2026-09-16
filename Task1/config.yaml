@@ -255,6 +255,22 @@ feature_engineering:
           type: "passthrough"
           required: false
 
+    interactions:
+      enabled: true
+      description: "乘性交互特征（法拉第定律: 实际沉积 = 理论因子 × 电镀效率）"
+      eps: 1.0e-5
+      interactions:
+        - factor_col: "Top_Theoretical_Factor"
+          efficiency_col: "GALV_EFF_TOP"
+          output_col: "Top_Predicted_Weight_By_Theory"
+          required: false
+          description: "上表面理论沉积厚度（含效率修正）"
+        - factor_col: "Bot_Theoretical_Factor"
+          efficiency_col: "GALV_EFF_BOT"
+          output_col: "Bot_Predicted_Weight_By_Theory"
+          required: false
+          description: "下表面理论沉积厚度（含效率修正）"
+
   # 核心必需特征（任何情况下都必须生成，否则后续模块崩溃）
   required_features:
     - "Top_Current_Sum"
@@ -266,7 +282,7 @@ feature_engineering:
     - "Steel_Grade_Encoded"
 
   # 启用的特征组顺序（重要：某些特征依赖前面的计算结果）
-  enabled_groups: ["electrical", "physical", "encoding", "residuals", "new_metrics"]
+  enabled_groups: ["electrical", "physical", "encoding", "residuals", "new_metrics", "interactions"]
 
   # 特征输出行为
   output_behavior:

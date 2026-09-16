@@ -42,6 +42,10 @@ LEGACY_FEATURES_BOT = [
 NEW_FEATURES_TOP = ['GALV_EFF_TOP', 'GALV_MAX_CUR_DEN_TOP']
 NEW_FEATURES_BOT = ['GALV_EFF_BOT', 'GALV_MAX_CUR_DEN_BOT']
 
+# 交互特征（理论沉积厚度）
+INTERACTION_FEATURES_TOP = ['Top_Predicted_Weight_By_Theory']
+INTERACTION_FEATURES_BOT = ['Bot_Predicted_Weight_By_Theory']
+
 # EDA 分析特征（在线值前置）
 EDA_LEGACY_FEATURES_TOP = [
     'Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg',
@@ -50,6 +54,15 @@ EDA_LEGACY_FEATURES_TOP = [
 EDA_LEGACY_FEATURES_BOT = [
     'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg',
 ] + LEGACY_FEATURES_BOT
+
+# EDA 交互特征（理论沉积厚度）
+EDA_INTERACTION_FEATURES_TOP = [
+    'Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg',
+] + INTERACTION_FEATURES_TOP
+
+EDA_INTERACTION_FEATURES_BOT = [
+    'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg',
+] + INTERACTION_FEATURES_BOT
 
 
 def load_config(config_path: str = 'config.yaml') -> dict:
@@ -142,6 +155,20 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
             analysis_results['new_features_missing'].append(feat)
             print(f"✗ 缺失新特征: {feat}")
     
+    # 检查交互特征是否存在
+    interaction_features_top = [f for f in INTERACTION_FEATURES_TOP if f in featured_df.columns]
+    interaction_features_bot = [f for f in INTERACTION_FEATURES_BOT if f in featured_df.columns]
+    
+    for feat in interaction_features_top + interaction_features_bot:
+        analysis_results['new_features_found'].append(feat)
+        print(f"✓ 发现交互特征: {feat}")
+    
+    missing_interaction = [f for f in INTERACTION_FEATURES_TOP + INTERACTION_FEATURES_BOT if f not in featured_df.columns]
+    if missing_interaction:
+        for feat in missing_interaction:
+            analysis_results['new_features_missing'].append(feat)
+            print(f"✗ 缺失交互特征: {feat}")
+    
     # 初始化分析器
     print("\n[初始化] 分析工具...")
     correlation_analyzer = SurfaceCorrelationAnalyzer(
@@ -207,9 +234,9 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
                 'surface': 'Top', 'type': 'new', 'status': 'failed', 'error': str(e)
             })
         
-        # 1.3 组合特征相关性
+        # 1.3 组合特征相关性（包括交互特征）
         try:
-            combined_top = LEGACY_FEATURES_TOP + new_features_top
+            combined_top = LEGACY_FEATURES_TOP + new_features_top + interaction_features_top
             print(f"  分析组合特征相关性 ({len(combined_top)} 个特征)...")
             correlation_analyzer.analyze_custom_features(
                 df=featured_df,
@@ -287,9 +314,9 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
                 'surface': 'Bot', 'type': 'new', 'status': 'failed', 'error': str(e)
             })
         
-        # 2.3 组合特征相关性
+        # 2.3 组合特征相关性（包括交互特征）
         try:
-            combined_bot = LEGACY_FEATURES_BOT + new_features_bot
+            combined_bot = LEGACY_FEATURES_BOT + new_features_bot + interaction_features_bot
             print(f"  分析组合特征相关性 ({len(combined_bot)} 个特征)...")
             correlation_analyzer.analyze_custom_features(
                 df=featured_df,
@@ -362,9 +389,9 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
                 'surface': 'Top', 'type': 'new', 'status': 'failed', 'error': str(e)
             })
         
-        # 3.3 组合特征 EDA
+        # 3.3 组合特征 EDA（包括交互特征）
         try:
-            combined_eda_top = EDA_LEGACY_FEATURES_TOP + new_features_top
+            combined_eda_top = EDA_LEGACY_FEATURES_TOP + new_features_top + interaction_features_top
             print(f"  分析组合特征 ({len(combined_eda_top)} 个特征)...")
             eda_analyzer.analyze(
                 df=featured_df,
@@ -435,9 +462,9 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
                 'surface': 'Bot', 'type': 'new', 'status': 'failed', 'error': str(e)
             })
         
-        # 4.3 组合特征 EDA
+        # 4.3 组合特征 EDA（包括交互特征）
         try:
-            combined_eda_bot = EDA_LEGACY_FEATURES_BOT + new_features_bot
+            combined_eda_bot = EDA_LEGACY_FEATURES_BOT + new_features_bot + interaction_features_bot
             print(f"  分析组合特征 ({len(combined_eda_bot)} 个特征)...")
             eda_analyzer.analyze(
                 df=featured_df,
@@ -453,7 +480,7 @@ def analyze_new_features(featured_df: pd.DataFrame, save_matrices: str = 'excel'
             })
             print(f"  ✓ 组合特征 EDA 完成")
         except Exception as e:
-            print(f"  ✗ 组合特征 EDA 失败: {str(e)}")
+            print(f"  ✗组合特征 EDA 失败: {str(e)}")
             analysis_results['eda_analyses'].append({
                 'surface': 'Bot', 'type': 'combined', 'status': 'failed', 'error': str(e)
             })

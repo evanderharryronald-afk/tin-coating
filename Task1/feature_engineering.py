@@ -108,6 +108,8 @@ class FeatureEngineer:
             return self._add_encoding_features(df, group_config)
         elif group_name == 'new_metrics':
             return self._add_new_metric_features(df, group_config)
+        elif group_name == 'interactions':
+            return self._add_interaction_features(df, group_config)
         else:
             raise ValueError(f"Unknown feature group: {group_name}")
 
@@ -221,6 +223,34 @@ class FeatureEngineer:
         
         return df
 
+    def _add_interaction_features(self, df: pd.DataFrame, config: Dict) -> pd.DataFrame:
+        """
+        交互特征（乘性）：根据法拉第定律
+        实际沉积量 ≈ 理论因子 × 电镀效率
+        
+        用于捕捉新指标与理论因子的乘性关系
+        """
+        interactions = config.get('interactions', [])
+        eps = config.get('eps', self.eps)
+        
+        for interaction in interactions:
+            factor_col = interaction['factor_col']  # 理论因子列
+            efficiency_col = interaction['efficiency_col']  # 电镀效率列
+            output_col = interaction['output_col']  # 输出列名
+            required = interaction.get('required', False)
+            
+            # 检查列是否存在
+            if factor_col not in df.columns or efficiency_col not in df.columns:
+                if required:
+                    raise KeyError(f"缺少交互特征列: {factor_col} 或 {efficiency_col}")
+                else:
+                    continue
+            
+            # 构建乘性交互特征
+            df[output_col] = df[factor_col] * df[efficiency_col]
+        
+        return df
+
     def _get_default_config(self) -> Dict:
         """
         返回默认配置（向后兼容）
@@ -281,10 +311,31 @@ class FeatureEngineer:
                             {'name': 'GALV_MAX_CUR_DEN_TOP', 'source_col': 'GALV_MAX_CUR_DEN_TOP', 'type': 'passthrough', 'required': False},
                             {'name': 'GALV_MAX_CUR_DEN_BOT', 'source_col': 'GALV_MAX_CUR_DEN_BOT', 'type': 'passthrough', 'required': False}
                         ]
+                    },
+                    'interactions': {
+                        'enabled': True,
+                        'description': '乘性交互特征（法拉第定律: 实际沉积 = 理论因子 × 电镀效率）',
+                        'eps': 1.0e-5,
+                        'interactions': [
+                            {
+                                'factor_col': 'Top_Theoretical_Factor',
+                                'efficiency_col': 'GALV_EFF_TOP',
+                                'output_col': 'Top_Predicted_Weight_By_Theory',
+                                'required': False,
+                                'description': '上表面理论沉积厚度（含效率修正）'
+                            },
+                            {
+                                'factor_col': 'Bot_Theoretical_Factor',
+                                'efficiency_col': 'GALV_EFF_BOT',
+                                'output_col': 'Bot_Predicted_Weight_By_Theory',
+                                'required': False,
+                                'description': '下表面理论沉积厚度（含效率修正）'
+                            }
+                        ]
                     }
                 },
                 'required_features': self.REQUIRED_FEATURES,
-                'enabled_groups': ['electrical', 'physical', 'encoding', 'residuals', 'new_metrics'],
+                'enabled_groups': ['electrical', 'physical', 'encoding', 'residuals', 'new_metrics', 'interactions'],
                 'output_behavior': {
                     'drop_intermediate': False,
                     'na_strategy': 'keep',

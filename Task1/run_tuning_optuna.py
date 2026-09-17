@@ -8,6 +8,7 @@ from optuna.samplers import NSGAIISampler
 from optuna.visualization import (
     plot_pareto_front, plot_param_importances, plot_slice, plot_parallel_coordinate
 )
+from sklearn.model_selection import TimeSeriesSplit
 
 from coating_model_by_group import (
     build_setpoint_group_key, fit_and_evaluate_surface
@@ -48,11 +49,105 @@ def load_config(config_path):
     return default_config
 
 
-def make_objective(group_df, surface, group_tag, train_ratio=0.65, val_ratio=0.20):
+def make_objective_with_timeseries_cv(group_df, surface, group_tag, n_splits=3, 
+                                       pos_boost_upper=2.0, damping_upper=1.0, test_ratio=0.15):
+    """
+    使用 TimeSeriesSplit 交叉验证的 Optuna 目标函数。
+    
+    params:
+    - group_df: 按时间序列排列的数据
+    - surface: 'Top' 或 'Bot'
+    - group_tag: 规格组标签
+    - n_splits: TimeSeriesSplit 折数（默认 3）
+    - pos_boost_upper: pos_boost 搜索上限（默认 2.0，防止过拟合少数样本）
+    - damping_upper: damping 搜索上限（默认 1.0）
+    - test_ratio: 测试集比例（默认 0.15，保留最后 15% 数据作为独立测试集）
+    
+    目标函数返回多折交叉验证的平均 RMSE（作为 Optuna 的寻优目标）
+    注：TimeSeriesSplit CV 只在前 (1-test_ratio) 的数据上进行，保留最后 test_ratio 的数据作为独立测试集
+    """
+    def objective(trial):
+        # 搜索空间（pos_boost 上限已减小，防止过度拟合偏低样本）
+        params = {
+            "damping": trial.suggest_float("damping", 0.0, damping_upper),
+            "pos_boost": trial.suggest_float("pos_boost", 1.0, pos_boost_upper),
+            "alpha_smoothing": trial.suggest_float("alpha_smoothing", 0.3, 1.0),
+            "max_iter": trial.suggest_int("max_iter", 100, 500, step=50),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+        }
+        
+        try:
+            # 分离测试集（最后 test_ratio 的数据）
+            test_cutoff = int(len(group_df) * (1 - test_ratio))
+            cv_df = group_df.iloc[:test_cutoff]  # 前 (1-test_ratio) 用于 CV
+            # test_df = group_df.iloc[test_cutoff:]  # 最后 test_ratio 用于最终评估（暂未使用）
+            
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            cv_rmses = []
+            cv_worst_maes = []
+            
+            # 时间序列交叉验证（只在 cv_df 上进行）
+            for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(cv_df)):
+                # 正确合并 train 和 val 索引（使用 np.concatenate）
+                combined_idx = np.concatenate([train_idx, val_idx])
+                fold_df = cv_df.iloc[combined_idx].reset_index(drop=True)
+                
+                # 调整 train_ratio 以适应当前 fold（train 部分为 fold 数据的前 len(train_idx) 行）
+                fold_train_ratio = len(train_idx) / len(fold_df)
+                fold_val_ratio = len(val_idx) / len(fold_df)
+                
+                _, metrics, _ = fit_and_evaluate_surface(
+                    fold_df, surface, params, group_tag=f"{group_tag}_fold{fold_idx}",
+                    train_ratio=fold_train_ratio, val_ratio=fold_val_ratio
+                )
+                
+                rmse = metrics.get("RMSE_模型_验证", np.nan)
+                high_mae = metrics.get("在线偏高MAE_模型_验证", np.nan)
+                low_mae = metrics.get("在线偏低MAE_模型_验证", np.nan)
+                
+                if not np.isnan(rmse):
+                    cv_rmses.append(rmse)
+                
+                # 某一方向样本为 0 时为 NaN，取有效一侧；两侧都有效则取最差
+                candidates = [v for v in (high_mae, low_mae) if not np.isnan(v)]
+                worst_mae = max(candidates) if candidates else np.nan
+                if not np.isnan(worst_mae):
+                    cv_worst_maes.append(worst_mae)
+            
+            # 计算多折平均指标
+            avg_rmse = np.mean(cv_rmses) if cv_rmses else float("inf")
+            avg_worst_mae = np.mean(cv_worst_maes) if cv_worst_maes else float("inf")
+            
+            if np.isnan(avg_rmse):
+                avg_rmse = float("inf")
+            if np.isnan(avg_worst_mae):
+                avg_worst_mae = float("inf")
+            
+            return avg_rmse, avg_worst_mae
+            
+        except Exception as e:
+            import traceback
+            print(f"\n{'=' * 60}")
+            print(f"[ERROR] 时间序列 CV 调参失败!")
+            print(f"  规格组: {group_tag}")
+            print(f"  表面: {surface}")
+            print(f"  参数: {params}")
+            print(f"  异常类型: {type(e).__name__}")
+            print(f"  异常信息: {e}")
+            traceback.print_exc()
+            print(f"{'=' * 60}\n")
+            return float("inf"), float("inf")
+    
+    return objective
+
+
+def make_objective(group_df, surface, group_tag, train_ratio=0.65, val_ratio=0.20, 
+                   pos_boost_upper=8.0, damping_upper=1.0):
     def objective(trial):
         params = {
-            "damping": trial.suggest_float("damping", 0.0, 1.0),
-            "pos_boost": trial.suggest_float("pos_boost", 1.0, 8.0),
+            "damping": trial.suggest_float("damping", 0.0, damping_upper),
+            "pos_boost": trial.suggest_float("pos_boost", 1.0, pos_boost_upper),
             "alpha_smoothing": trial.suggest_float("alpha_smoothing", 0.3, 1.0),
             "max_iter": trial.suggest_int("max_iter", 100, 500, step=50),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -166,7 +261,8 @@ def evaluate_best_trials_on_test(study, group_df, group_label, surface,
 
 
 def tune_one(group_df, group_label, surface, n_trials, result_subdir,
-             eval_test_after_tuning=True, train_ratio=0.65, val_ratio=0.20):
+             eval_test_after_tuning=True, train_ratio=0.65, val_ratio=0.20,
+             use_timeseries_cv=False, cv_n_splits=3, pos_boost_upper=8.0, test_ratio=0.15):
     """
     执行单次调参
 
@@ -178,9 +274,19 @@ def tune_one(group_df, group_label, surface, n_trials, result_subdir,
         result_subdir: 结果子目录 (如 "global" 或 "per_group")
         eval_test_after_tuning: 搜索结束后是否对 Pareto 解评估测试集（默认 True）
         train_ratio / val_ratio: 与 fit_and_evaluate_surface 保持一致
+        use_timeseries_cv: 是否使用 TimeSeriesSplit 交叉验证（默认 False，保持向后兼容）
+        cv_n_splits: TimeSeriesSplit 的折数（默认 3）
+        pos_boost_upper: pos_boost 搜索上限（默认 8.0；建议 CV 模式下用 2.0）
     """
     tag = f"{group_label}__{surface}"
     print(f"\n===== 开始调参: {tag}, trials={n_trials} =====")
+    
+    if use_timeseries_cv:
+        print(f"  调参模式: TimeSeriesSplit 交叉验证（{cv_n_splits} 折）")
+        print(f"  pos_boost 搜索上限: {pos_boost_upper}")
+    else:
+        print(f"  调参模式: 单一验证集（向后兼容）")
+    
     print(f"  切分比例: train={train_ratio:.2f}, val={val_ratio:.2f}, "
           f"test={1.0 - train_ratio - val_ratio:.2f}")
     print(f"  搜索结束后评估测试集: {'是' if eval_test_after_tuning else '否'}")
@@ -192,9 +298,25 @@ def tune_one(group_df, group_label, surface, n_trials, result_subdir,
         sampler=NSGAIISampler(seed=42)
     )
 
+    # 选择目标函数（CV 模式 或 单验证集模式）
+    if use_timeseries_cv:
+        objective_fn = make_objective_with_timeseries_cv(
+            group_df, surface, group_label,
+            n_splits=cv_n_splits,
+            pos_boost_upper=pos_boost_upper,
+            damping_upper=1.0,
+            test_ratio=test_ratio
+        )
+    else:
+        objective_fn = make_objective(
+            group_df, surface, group_label,
+            train_ratio=train_ratio, val_ratio=val_ratio,
+            pos_boost_upper=pos_boost_upper,
+            damping_upper=1.0
+        )
+
     study.optimize(
-        make_objective(group_df, surface, group_label,
-                       train_ratio=train_ratio, val_ratio=val_ratio),
+        objective_fn,
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[print_trial_result],
@@ -338,6 +460,10 @@ def run_global_tuning(data_path, config):
             eval_test_after_tuning=config.get("eval_test_after_tuning", True),
             train_ratio=config.get("train_ratio", 0.65),
             val_ratio=config.get("val_ratio", 0.20),
+            use_timeseries_cv=config.get("use_timeseries_cv", False),
+            cv_n_splits=config.get("cv_n_splits", 3),
+            pos_boost_upper=config.get("pos_boost_upper", 8.0),
+            test_ratio=config.get("test_ratio", 0.15),
         )
         all_best_trials.append(best_trials_df)
 
@@ -387,6 +513,10 @@ def run_per_group_tuning(data_path, config):
                 eval_test_after_tuning=config.get("eval_test_after_tuning", True),
                 train_ratio=config.get("train_ratio", 0.65),
                 val_ratio=config.get("val_ratio", 0.20),
+                use_timeseries_cv=config.get("use_timeseries_cv", False),
+                cv_n_splits=config.get("cv_n_splits", 3),
+                pos_boost_upper=config.get("pos_boost_upper", 8.0),
+                test_ratio=config.get("test_ratio", 0.15),
             )
             all_best_trials.append(best_trials_df)
 
@@ -399,10 +529,15 @@ if __name__ == "__main__":
     #     "--config", type=str, default="optuna_tuning_config_global.json",
     #     help="配置文件路径 (默认: optuna_tuning_config_global.json)"
     # )
+    # parser.add_argument(
+    #     "--config", type=str, default="optuna_tuning_config_grouped.json",
+    #     help="配置文件路径 (默认: optuna_tuning_config_grouped.json)"
+    # )
     parser.add_argument(
-        "--config", type=str, default="optuna_tuning_config_grouped.json",
-        help="配置文件路径 (默认: optuna_tuning_config_grouped.json)"
+        "--config", type=str, default="optuna_tuning_config_grouped_cv.json",
+        help="配置文件路径 (默认: optuna_tuning_config_grouped_cv.json)"
     )
+
     args = parser.parse_args()
 
     # 1. 加载 JSON 配置

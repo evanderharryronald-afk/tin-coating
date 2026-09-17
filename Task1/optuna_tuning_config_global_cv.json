@@ -8,7 +8,7 @@
   "val_ratio": 0.20,
   "test_ratio": 0.15,
   "groups": null,
-  "use_timeseries_cv": false,
-  "cv_n_splits": 3,
-  "pos_boost_upper": 8.0
+  "use_timeseries_cv": true,
+  "cv_n_splits": 5,
+  "pos_boost_upper": 2.0
 }

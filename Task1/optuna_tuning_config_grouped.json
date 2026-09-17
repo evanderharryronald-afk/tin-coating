@@ -6,6 +6,7 @@
   "eval_test_after_tuning": true,
   "train_ratio": 0.65,
   "val_ratio": 0.20,
+  "test_ratio": 0.15,
   "groups": [
     "Top2.799_Bot2.799",
     "Top2.0_Bot2.0",
@@ -16,5 +17,8 @@
     "Top2.0_Bot5.0",
     "Top1.1_Bot2.799",
     "Top1.1_Bot2.2"
-  ]
+  ],
+  "use_timeseries_cv": false,
+  "cv_n_splits": 3,
+  "pos_boost_upper": 8.0
 }

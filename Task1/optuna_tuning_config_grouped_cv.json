@@ -1,14 +1,16 @@
 {
-  "mode": "global",
+  "mode": "per_group",
   "data_path": "result/data/feature_engineered_data/featured_data.xlsx",
   "min_samples": 200,
-  "n_trials": 80,
+  "n_trials": 50,
   "eval_test_after_tuning": true,
   "train_ratio": 0.65,
   "val_ratio": 0.20,
   "test_ratio": 0.15,
-  "groups": null,
-  "use_timeseries_cv": false,
+  "groups": [
+    "Top2.799_Bot2.799"
+  ],
+  "use_timeseries_cv": true,
   "cv_n_splits": 3,
-  "pos_boost_upper": 8.0
+  "pos_boost_upper": 2.0
 }

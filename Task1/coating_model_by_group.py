@@ -478,12 +478,12 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     feature_cols = [
         online_col,
         current_col,
-        f'{prefix}_Current_Per_Speed',
-        f'{prefix}_Theoretical_Factor',
+        # f'{prefix}_Current_Per_Speed',
+        # f'{prefix}_Theoretical_Factor',
         speed_col,
         'Dimension_[mm]_Width',
         'Dimension_[mm]_Thickness',
-        'Steel_Grade_Encoded'
+        # 'Steel_Grade_Encoded'
     ]
 
     X = df[feature_cols]
@@ -929,12 +929,12 @@ def get_feature_cols(surface: str) -> list:
     return [
         f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg",
         f"{prefix}_Current_Sum",
-        f"{prefix}_Current_Per_Speed",
-        f"{prefix}_Theoretical_Factor",
+        # f"{prefix}_Current_Per_Speed",  # 已移除（特征剪枝）
+        # f"{prefix}_Theoretical_Factor",  # 已移除（特征剪枝）
         "Speed[m/min]_Process_Avg",
         "Dimension_[mm]_Width",
         "Dimension_[mm]_Thickness",
-        "Steel_Grade_Encoded",
+        # "Steel_Grade_Encoded"  # 已移除（特征剪枝）
     ]
 
 

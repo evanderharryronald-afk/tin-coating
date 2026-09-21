@@ -1,13 +1,13 @@
 """
-【阶段 C：规格组重新分组（优化版 v4 - 正确的独立表面聚类）】
+【阶段 C：规格组重新分组（最终版本 - 正确的独立表面聚类）】
 
-【v4 核心改进】：
+【核心改进】：
 1. 分表面聚类：Top 和 Bot 完全独立处理
 2. 规格距离硬性约束：聚类内只连接距离 < 1.0 的对
 3. 独立输出：Top 聚类和 Bot 聚类分开，互不影响
 4. 清晰的建模指导：每个表面一份清晰的聚类清单
 
-【正确的设计理念】：
+【设计理念】：
 建模时对 Top 和 Bot 分别建模，所以合并决策也应该分别进行。
 例如：Top 表面可以是"A+C+D 共享一个模型"，
       Bot 表面可以是"A+B+E 共享一个模型"，
@@ -21,21 +21,21 @@ from typing import List, Set, Dict, Tuple
 import os
 
 
-def load_chow_results_v3(results_json: str = "result/spec_group_merge_analysis/chow_test_results_v3.json") -> list:
-    """加载 Phase B v3 的检验结果"""
+def load_chow_results(results_json: str = "result/spec_group_merge_analysis/chow_test_results_v3.json") -> list:
+    """加载 Phase B 的检验结果"""
     if not os.path.exists(results_json):
         raise FileNotFoundError(f"未找到检验结果文件: {results_json}")
     
     with open(results_json, 'r', encoding='utf-8') as f:
         results = json.load(f)
     
-    print(f"✓ 加载 Chow 检验结果 v3: {len(results)} 对")
+    print(f"\n✓ 加载 Chow 检验结果: {len(results)} 对")
     return results
 
 
-def build_merge_graph_v4(results: list, surface: str, max_spec_distance: float = 1.0) -> Tuple[nx.Graph, Dict]:
+def build_merge_graph(results: list, surface: str, max_spec_distance: float = 1.0) -> Tuple[nx.Graph, Dict]:
     """
-    构建合并关系图（v4）
+    构建合并关系图
     
     规则：
     1. 只选择该表面的可合并对
@@ -76,7 +76,7 @@ def build_merge_graph_v4(results: list, surface: str, max_spec_distance: float =
     return G, diagnostics
 
 
-def find_connected_components_v4(G: nx.Graph) -> Tuple[List[Set], Dict]:
+def find_connected_components(G: nx.Graph) -> Tuple[List[Set], Dict]:
     """
     找到连通分量
     
@@ -114,11 +114,11 @@ def collect_independent_groups(all_groups: Set, merged_components: List[Set]) ->
     return all_groups - merged_groups
 
 
-def print_grouping_results_v4(all_groups: Set, top_components: List[Set], top_diag: Dict,
+def print_grouping_results(all_groups: Set, top_components: List[Set], top_diag: Dict,
                                bot_components: List[Set], bot_diag: Dict):
-    """打印 v4 分组结果（两个表面独立显示）"""
+    """打印分组结果（两个表面独立显示）"""
     print("\n" + "="*80)
-    print("【规格组重新分组方案 v4 - 独立表面聚类】")
+    print("【规格组重新分组方案 - 独立表面聚类】")
     print("="*80)
     
     print("\n【Top 表面聚类结果】")
@@ -161,9 +161,9 @@ def print_grouping_results_v4(all_groups: Set, top_components: List[Set], top_di
     print("  这两个决策互不影响。")
 
 
-def export_grouping_config_v4(all_groups: Set, top_components: List[Set], bot_components: List[Set],
-                               output_path: str = "result/spec_group_merge_analysis/recommended_grouping_v4.json"):
-    """导出 v4 分组配置（两个表面独立）"""
+def export_grouping_config(all_groups: Set, top_components: List[Set], bot_components: List[Set],
+                               output_path: str = "result/spec_group_merge_analysis/recommended_grouping.json"):
+    """导出分组配置（两个表面独立）"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     # 提取 Top 聚类（只输出合并的，独立规格组隐含）
@@ -192,7 +192,7 @@ def export_grouping_config_v4(all_groups: Set, top_components: List[Set], bot_co
     bot_independent = sorted(list(all_groups - bot_merged_groups))
     
     config = {
-        'version': 'v4',
+        'version': '1.0',
         'description': '基于独立表面聚类的规格组合并方案',
         'methodology': '分表面聚类 + 规格距离约束（<1.0）+ 独立决策',
         
@@ -223,19 +223,19 @@ def export_grouping_config_v4(all_groups: Set, top_components: List[Set], bot_co
 
 
 def main():
-    """主流程 - v4"""
+    """主流程"""
     print("\n" + "="*80)
-    print("【阶段 C v4：正确的独立表面聚类】")
+    print("【阶段 C：正确的独立表面聚类】")
     print("="*80)
-    print("\n【v4 核心改进】：")
+    print("\n【核心改进】：")
     print("  ✓ 分表面聚类：Top 和 Bot 完全独立处理")
     print("  ✓ 规格距离约束：聚类内只连接距离 < 1.0 的对")
     print("  ✓ 独立输出：两个表面各自一份聚类清单")
     print("  ✓ 清晰的建模指导：说明两表面决策的独立性")
     
     try:
-        # 加载 Phase B v3 的结果
-        results = load_chow_results_v3()
+        # 加载 Phase B 的结果
+        results = load_chow_results()
         
         # 获取所有规格组
         all_groups_set = set()
@@ -245,8 +245,8 @@ def main():
         
         # 分表面构建图
         print("\n[构建合并关系图]")
-        top_graph, top_diag = build_merge_graph_v4(results, 'Top', max_spec_distance=1.0)
-        bot_graph, bot_diag = build_merge_graph_v4(results, 'Bot', max_spec_distance=1.0)
+        top_graph, top_diag = build_merge_graph(results, 'Top', max_spec_distance=1.0)
+        bot_graph, bot_diag = build_merge_graph(results, 'Bot', max_spec_distance=1.0)
         
         print(f"\n  Top 表面:")
         print(f"    可合并对: {top_diag['can_merge_pairs']} 对")
@@ -262,8 +262,8 @@ def main():
         
         # 找连通分量
         print("\n[寻找连通分量]")
-        top_components, top_comp_diag = find_connected_components_v4(top_graph)
-        bot_components, bot_comp_diag = find_connected_components_v4(bot_graph)
+        top_components, top_comp_diag = find_connected_components(top_graph)
+        bot_components, bot_comp_diag = find_connected_components(bot_graph)
         
         print(f"\n  Top 表面：{len(top_components)} 个连通分量")
         print(f"    - 合并聚类: {len(top_comp_diag['merged_clusters'])}")
@@ -274,14 +274,14 @@ def main():
         print(f"    - 独立规格组: {bot_comp_diag['single_independent']}")
         
         # 打印结果
-        print_grouping_results_v4(all_groups_set, top_components, top_comp_diag, 
+        print_grouping_results(all_groups_set, top_components, top_comp_diag, 
                                   bot_components, bot_comp_diag)
         
         # 导出配置
-        export_grouping_config_v4(all_groups_set, top_components, bot_components)
+        export_grouping_config(all_groups_set, top_components, bot_components)
         
         print("\n" + "="*80)
-        print("【阶段 C v4 完成】")
+        print("【阶段 C 完成】")
         print("="*80)
         
         return True

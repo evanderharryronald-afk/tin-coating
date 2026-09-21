@@ -117,15 +117,44 @@ def summarize_groups(df) -> pd.DataFrame:
     return df[df['Setpoint_Group_Label'].isin(valid_groups.index)].copy()
 
 
+def parse_spec_values(group_label: str) -> tuple:
+    """
+    从规格组标签解析 Top 和 Bot 的镇锡厚度设定值
+    例：'Top2.0_Bot2.0' → (2.0, 2.0)
+    """
+    parts = group_label.split('_')
+    top_val = float(parts[0].replace('Top', ''))
+    bot_val = float(parts[1].replace('Bot', ''))
+    return top_val, bot_val
+
+
+def compute_spec_distance(group_A: str, group_B: str) -> float:
+    """
+    计算两个规格组之间的欧氏距离
+    
+    参数：
+      group_A: 'Top2.0_Bot2.0'
+      group_B: 'Top2.799_Bot2.799'
+    
+    返回：两个规格组的欧氏距离
+    """
+    top_A, bot_A = parse_spec_values(group_A)
+    top_B, bot_B = parse_spec_values(group_B)
+    
+    distance = np.sqrt((top_A - top_B)**2 + (bot_A - bot_B)**2)
+    return distance
+
+
 def perform_ks_tests(df) -> list:
     """
-    对所有规格组对进行 KS 检验（改进版）
+    对所有规格组对进行 KS 检验（优化版 v2）
     
     改进点：
     1. KS 检验作为参考而非硬性过滤
     2. 保留所有候选对（包括边界情况）
     3. 添加详细的分布诊断信息
-    4. 记录不通过理由（用于后续分析）
+    4. 新增：规格距离计算（支持规格接近度排序）
+    5. 新增：分表面的规格接近度分析
     
     返回候选合并对列表
     """
@@ -161,6 +190,9 @@ def perform_ks_tests(df) -> list:
             mean_diff = abs(delta_A.mean() - delta_B.mean())
             std_diff = abs(delta_A.std() - delta_B.std())
             
+            # 【新增】计算规格距离
+            spec_distance = compute_spec_distance(group_A, group_B)
+            
             # 构建候选对记录
             candidate = {
                 'surface': surface,
@@ -178,19 +210,23 @@ def perform_ks_tests(df) -> list:
                 'std_B': delta_B.std(),
                 'std_diff': std_diff,
                 'merged_size': len(delta_A) + len(delta_B),
+                'spec_distance': spec_distance,  # 【新增】规格距离
                 'ks_interpretation': f"{'✓ 分布相同' if ks_pass else '✗ 分布不同'} (p={p_value:.4f})"
             }
             
-            # 改进规则：保留所有候选对，而不是只保留通过的
-            # 这样可以在 Phase B 中更灵活地处理
             candidates.append(candidate)
     
-    # 按优先级排序：
-    # 1. 优先保留 KS 通过的对
-    # 2. 其次按小样本数量排序（小样本更容易受噪声影响，合并的收益更大）
+    # 【优化】按优先级排序：
+    # 1. 优先 KS 通过的对
+    # 2. 其次按规格接近度排序（规格相近更可能合并）
+    # 3. 第三按样本量排序（样本多更稳定）
     candidates = sorted(
         candidates, 
-        key=lambda x: (not x['ks_pass'], -min(x['size_A'], x['size_B']))
+        key=lambda x: (
+            not x['ks_pass'],           # 第一优先级：KS 通过
+            x['spec_distance'],         # 第二优先级：规格接近（升序）
+            -min(x['size_A'], x['size_B'])  # 第三优先级：样本量多（降序）
+        )
     )
     
     return candidates
@@ -198,14 +234,12 @@ def perform_ks_tests(df) -> list:
 
 def print_ks_results(candidates: list):
     """
-    打印 KS 检验结果（改进版）
+    打印 KS 检验结果（优化版 v2）
     
-    说明：
-    - ✓ 标记: KS 通过（分布相同），优先级高
-    - ○ 标记: KS 边界或略微不同，可作为备选
+    【新增】：显示规格距离的分析
     """
     print("\n" + "="*100)
-    print("【KS 检验结果 - 规格组合并候选对分析】")
+    print("【KS 检验结果 - 规格组合并候选对分析（按规格距离优先）】")
     print("="*100)
     
     if not candidates:
@@ -220,48 +254,67 @@ def print_ks_results(candidates: list):
     print(f"  ✓ KS 通过（分布相同）: {len(ks_pass)} 对")
     print(f"  ○ KS 未通过（分布略异）: {len(ks_fail)} 对")
     
-    # 显示 KS 通过的对
+    # 【新增】按规格距离统计
+    spec_dist_analysis = {
+        'very_close': [c for c in candidates if c.get('spec_distance', 2.0) < 0.5],
+        'close': [c for c in candidates if 0.5 <= c.get('spec_distance', 2.0) < 0.8],
+        'medium': [c for c in candidates if 0.8 <= c.get('spec_distance', 2.0) < 1.5],
+        'far': [c for c in candidates if c.get('spec_distance', 2.0) >= 1.5]
+    }
+    
+    print(f"\n规格距离分布：")
+    print(f"  · 非常接近 (<0.5): {len(spec_dist_analysis['very_close'])} 对 (最有希望)")
+    print(f"  · 接近 (0.5-0.8): {len(spec_dist_analysis['close'])} 对")
+    print(f"  · 中等 (0.8-1.5): {len(spec_dist_analysis['medium'])} 对")
+    print(f"  · 差异大 (>1.5): {len(spec_dist_analysis['far'])} 对 (难以合并)")
+    
+    # 显示 KS 通过的对（按规格距离排序）
     if ks_pass:
         print("\n" + "-"*100)
-        print("【第一优先级：KS 分布检验通过】")
+        print("【优先级 1：KS 分布检验通过（按规格接近度排序）】")
         print("-"*100)
-        for i, cand in enumerate(ks_pass, 1):
-            print(f"\n{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
-            print(f"   样本数: {cand['size_A']:>4} + {cand['size_B']:>4} = {cand['merged_size']}")
-            print(f"   均值: {cand['mean_A']:>8.4f} vs {cand['mean_B']:>8.4f}  (差异: {cand['mean_diff']:.4f})")
-            print(f"   标准差: {cand['std_A']:>8.4f} vs {cand['std_B']:>8.4f}  (差异: {cand['std_diff']:.4f})")
-            print(f"   KS 检验: p={cand['p_value']:.6f} ✓ ({cand['ks_interpretation']})")
-            print(f"   含义: 两个规格组的测量误差分布统计上相同（可能可以合并）")
-    
-    # 显示 KS 未通过的对（如果有）
-    if ks_fail:
-        print("\n" + "-"*100)
-        print("【第二优先级：KS 分布检验未通过（分布略有不同）】")
-        print("-"*100)
-        print("\n说明: 这些对虽然 KS 检验未通过，但仍可作为备选。")
-        print("原因：KS 检验只检查边际分布，不检查条件分布。即使分布略异，")
-        print("如果校准规律相同（Chow 检验），仍可考虑合并。")
-        print()
         
-        for i, cand in enumerate(ks_fail, 1):
-            print(f"{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
+        ks_pass_sorted = sorted(ks_pass, key=lambda x: x.get('spec_distance', 2.0))
+        for i, cand in enumerate(ks_pass_sorted, 1):
+            print(f"\n{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
+            print(f"   规格距离: {cand.get('spec_distance', 0):.3f} g/m² (欧氏距离)")
             print(f"   样本数: {cand['size_A']:>4} + {cand['size_B']:>4} = {cand['merged_size']}")
             print(f"   均值: {cand['mean_A']:>8.4f} vs {cand['mean_B']:>8.4f}  (差异: {cand['mean_diff']:.4f})")
-            print(f"   标准差: {cand['std_A']:>8.4f} vs {cand['std_B']:>8.4f}  (差异: {cand['std_diff']:.4f})")
-            print(f"   KS 检验: p={cand['p_value']:.6f} ✗ ({cand['ks_interpretation']})")
+            print(f"   KS 检验: p={cand['p_value']:.6f} ✓")
     
+    # 显示 KS 未通过但规格接近的对
+    close_but_ks_fail = [c for c in ks_fail if c.get('spec_distance', 2.0) < 1.0]
+    if close_but_ks_fail:
+        print("\n" + "-"*100)
+        print("【优先级 2：KS 未通过但规格接近（进入 Phase B 快速检查）】")
+        print("-"*100)
+        
+        close_sorted = sorted(close_but_ks_fail, key=lambda x: x.get('spec_distance', 2.0))
+        for i, cand in enumerate(close_sorted[:10], 1):  # 只显示前10个
+            print(f"\n{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
+            print(f"   规格距离: {cand.get('spec_distance', 0):.3f} g/m²")
+            print(f"   样本数: {cand['size_A']:>4} + {cand['size_B']:>4} = {cand['merged_size']}")
+            print(f"   KS 检验: p={cand['p_value']:.6f} (接近但未通过)")
+        
+        if len(close_sorted) > 10:
+            print(f"\n... 共 {len(close_sorted)} 对")
+    
+    print(f"\n【优先级 3：KS 检验失败且规格差异大（直接排除）】")
+    print(f"  共 {len(spec_dist_analysis['far'])} 对规格距离 > 1.5 的候选")
     print()
 
 
 def export_candidates_to_csv(candidates: list, output_path: str = "result/spec_group_merge_analysis/merge_candidates.csv"):
-    """导出候选对到 CSV"""
+    """导出候选对到 CSV（包含规格距离）"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     df_cand = pd.DataFrame(candidates)
-    df_cand = df_cand.sort_values('merged_size', ascending=False)
+    # 【新增】按规格距离和 KS 通过状态排序
+    df_cand = df_cand.sort_values(['ks_pass', 'spec_distance'], ascending=[False, True])
     df_cand.to_csv(output_path, index=False, encoding='utf-8')
     
     print(f"\n✓ 候选合并对已导出至: {output_path}")
+    print(f"  （按 KS 通过状态和规格距离排序，规格相近的对优先）")
     return df_cand
 
 

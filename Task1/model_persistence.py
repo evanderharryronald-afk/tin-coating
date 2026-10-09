@@ -204,16 +204,21 @@ class ModelSaver:
             # 保存模型
             compress_level = 3 if self.compress else 0
             joblib.dump(model, str(model_path), compress=compress_level)
-            print(f"[✓] 模型已保存: {model_path}")
+            print(f"[OK] 模型已保存: {model_path}")
             
-            # 保存元数据（使用自定义序列化）
-            metadata_dict = metadata.to_dict()
-            # 再次清理序列化后的字典中的非 JSON 可序列化对象
+            # 保存元数据
+            # metadata 可能是字典或 ModelMetadata 对象
+            if isinstance(metadata, dict):
+                metadata_dict = metadata
+            else:
+                metadata_dict = metadata.to_dict() if hasattr(metadata, 'to_dict') else dict(metadata)
+            
+            # 清理序列化后的字典中的非 JSON 可序列化对象
             metadata_dict = self._serialize_for_json(metadata_dict)
             
             with open(metadata_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata_dict, f, indent=2, ensure_ascii=False)
-            print(f"[✓] 元数据已保存: {metadata_path}")
+            print(f"[OK] 元数据已保存: {metadata_path}")
             
             return {
                 'model_path': str(model_path),
@@ -221,7 +226,7 @@ class ModelSaver:
             }
         
         except Exception as e:
-            print(f"[✗] 保存失败: {e}")
+            print(f"[ERROR] 保存失败: {e}")
             raise
     
     def save_batch(self, 

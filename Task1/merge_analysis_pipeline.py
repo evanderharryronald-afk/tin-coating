@@ -1,84 +1,218 @@
+# -*- coding: utf-8 -*-
 """
-【完整规格组合并分析流水线】
+spec_merge_analyzer - Framework for merging feasibility analysis
+v3.0 - Configuration-driven, multi-strategy support
 
-使用 spec_merge_analyzer 包执行规格组合并分析。
-
-整合三个阶段：
-  阶段 A: KS 检验 - 筛选 Delta 分布相同的规格组对
-  阶段 B: Chow 检验 + 性能对比 - 验证校准规律和实际性能
-  阶段 C: 图论分组 - 基于检验结果自动分组
-
-用户可以逐阶段执行或一键运行全流程。
-
-使用方式：
-  python merge_analysis_pipeline.py --phase all
-  python merge_analysis_pipeline.py --phase a
-  python merge_analysis_pipeline.py --phase b
-  python merge_analysis_pipeline.py --phase c
+Run directly in PyCharm - no CLI arguments needed
 """
 
 import sys
 import os
-import argparse
+import logging
 
-# 导入包
+# Import package
 try:
     import spec_merge_analyzer as analyzer
 except ImportError as e:
-    print(f"✗ 导入 spec_merge_analyzer 包失败: {e}")
-    print("  请确保 spec_merge_analyzer 包在当前目录或 Python 路径中")
+    print(f"[E] Failed to import spec_merge_analyzer: {e}")
+    print("    Please ensure spec_merge_analyzer package is in current directory or Python path")
     sys.exit(1)
 
 
 def main():
-    """主程序"""
-    parser = argparse.ArgumentParser(
-        description="规格组合并可行性分析流水线（使用 spec_merge_analyzer 包）"
-    )
+    """
+    Main program - select one of the execution methods below
+    """
     
-    parser.add_argument(
-        '--phase',
-        choices=['a', 'b', 'c', 'all'],
-        default='all',
-        help="执行的阶段（默认: all - 执行 A + B + C）"
-    )
+    # ========== [ACTIVE - Run all enabled strategies] ==========
+    run_all_strategies()
     
-    parser.add_argument(
-        '--skip-c',
-        action='store_true',
-        help="跳过阶段 C（仅执行 A 和 B）"
-    )
     
-    args = parser.parse_args()
+    # ========== [Other methods - uncomment to use] ==========
     
-    analyzer.print_summary()
+    # # Method 2: Run only surface_setpoint_level strategy
+    # run_single_strategy('surface_setpoint_level', 'all')
     
-    # 执行分析流水线
-    success = analyzer.run_analysis(phase=args.phase, skip_c=args.skip_c)
+    # # Method 3: Run only spec_group_cartesian strategy
+    # run_single_strategy('spec_group_cartesian', 'all')
     
-    if success:
-        print("\n" + "="*80)
-        print("【流水线执行完成】")
-        print("="*80)
-        print("\n生成的输出文件:")
+    # # Method 4: Run surface_setpoint_level strategy in phases
+    # run_single_strategy('surface_setpoint_level', 'a')   # Phase A only
+    # run_single_strategy('surface_setpoint_level', 'b')   # Phase B only
+    # run_single_strategy('surface_setpoint_level', 'c')   # Phase C only
+    
+    # # Method 5: Run phase A for all enabled strategies (quick screening)
+    # run_all_strategies_phase('a')
+    
+    # # Method 6: Custom config file
+    # run_all_strategies(config_path='custom_config.yaml')
+
+
+def run_all_strategies(config_path: str = 'grouping_config.yaml', phase: str = 'all'):
+    """
+    Run all enabled grouping strategies
+    
+    Args:
+        config_path: path to config file
+        phase: analysis phase ('a', 'b', 'c', 'all')
+    """
+    try:
+        # Initialize config
+        analyzer.init_config(config_path)
         
-        output_files = [
-            ("result/spec_group_merge_analysis/merge_candidates.csv", "阶段 A: 所有候选对"),
-            ("result/spec_group_merge_analysis/chow_test_results_v3.json", "阶段 B: Chow 检验结果"),
-            ("result/spec_group_merge_analysis/recommended_grouping.json", "阶段 C: 最终分组方案（独立表面）")
-        ]
+        # Print config summary
+        analyzer.print_summary()
         
-        for file_path, description in output_files:
-            if os.path.exists(file_path):
-                file_size = os.path.getsize(file_path)
-                print(f"  ✓ {file_path} ({file_size} bytes)")
+        # Run all enabled strategies
+        print("\n" + "=" * 80)
+        print("[INFO] Running all enabled grouping strategies")
+        print("=" * 80)
+        
+        results = analyzer.run_all_enabled_strategies(phase=phase)
+        
+        # Check results
+        all_success = all(results.values())
+        
+        print("\n" + "=" * 80)
+        print("[SUMMARY] Execution results")
+        print("=" * 80)
+        for strategy_name, success in results.items():
+            status = "[OK]" if success else "[FAIL]"
+            print(f"  {strategy_name}: {status}")
+        print("=" * 80)
+        
+        if not all_success:
+            failed = [name for name, success in results.items() if not success]
+            print(f"\n[WARN] Failed strategies: {', '.join(failed)}")
+            return False
+        
+        # Output file summary
+        show_output_files()
+        
+        return True
+    
+    except Exception as e:
+        print(f"\n[ERROR] Pipeline execution failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def run_single_strategy(strategy_name: str, phase: str = 'all', 
+                       config_path: str = 'grouping_config.yaml'):
+    """
+    Run a single grouping strategy
+    
+    Args:
+        strategy_name: strategy name ('surface_setpoint_level' or 'spec_group_cartesian')
+        phase: analysis phase ('a', 'b', 'c', 'all')
+        config_path: path to config file
+    """
+    try:
+        # Initialize config
+        analyzer.init_config(config_path)
+        
+        # Print config summary
+        analyzer.print_summary()
+        
+        # Run specified strategy
+        print("\n" + "=" * 80)
+        print(f"[INFO] Running strategy: {strategy_name}")
+        print("=" * 80)
+        
+        success = analyzer.run_analysis_with_strategy(strategy_name, phase=phase)
+        
+        print("\n" + "=" * 80)
+        if success:
+            print(f"[OK] Strategy '{strategy_name}' completed successfully")
+            show_output_files(strategy_name)
+        else:
+            print(f"[FAIL] Strategy '{strategy_name}' failed")
+        print("=" * 80)
+        
+        return success
+    
+    except Exception as e:
+        print(f"\n[ERROR] Strategy '{strategy_name}' execution failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def run_all_strategies_phase(phase: str = 'a', config_path: str = 'grouping_config.yaml'):
+    """
+    Run all enabled strategies for a specific phase
+    
+    Args:
+        phase: analysis phase ('a', 'b', 'c')
+        config_path: path to config file
+    """
+    try:
+        # Initialize config
+        analyzer.init_config(config_path)
+        
+        # Print config summary
+        analyzer.print_summary()
+        
+        # Run all enabled strategies for specified phase
+        print("\n" + "=" * 80)
+        print(f"[INFO] Running all enabled strategies - Phase {phase.upper()}")
+        print("=" * 80)
+        
+        results = analyzer.run_all_enabled_strategies(phase=phase)
+        
+        # Check results
+        all_success = all(results.values())
+        
+        print("\n" + "=" * 80)
+        print("[SUMMARY] Execution results")
+        print("=" * 80)
+        for strategy_name, success in results.items():
+            status = "[OK]" if success else "[FAIL]"
+            print(f"  {strategy_name}: {status}")
+        print("=" * 80)
+        
+        if not all_success:
+            failed = [name for name, success in results.items() if not success]
+            print(f"\n[WARN] Failed strategies: {', '.join(failed)}")
+            return False
+        
+        return True
+    
+    except Exception as e:
+        print(f"\n[ERROR] Pipeline execution failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def show_output_files(strategy_name: str = None):
+    """Show generated output files"""
+    try:
+        cfg = analyzer.get_config()
+        
+        if strategy_name:
+            result_dirs = [analyzer.get_result_dir(strategy_name)]
+        else:
+            result_dirs = [analyzer.get_result_dir(s) for s in cfg.get_enabled_strategies()]
+        
+        print("\n[INFO] Generated output files:")
+        for result_dir in result_dirs:
+            if os.path.exists(result_dir):
+                files = sorted(os.listdir(result_dir))
+                print(f"\n  Directory: {result_dir}/")
+                for f in files:
+                    file_path = os.path.join(result_dir, f)
+                    if os.path.isfile(file_path):
+                        file_size = os.path.getsize(file_path)
+                        print(f"     [OK] {f} ({file_size:,} bytes)")
             else:
-                print(f"  ✗ {file_path} (未生成)")
+                print(f"\n  [WARN] Directory does not exist: {result_dir}")
         
-        print("\n" + "="*80)
-    else:
-        print("\n✗ 流水线执行失败")
-        sys.exit(1)
+        print()
+    
+    except Exception as e:
+        print(f"[WARN] Failed to display output files: {e}")
 
 
 if __name__ == '__main__':

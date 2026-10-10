@@ -1,0 +1,189 @@
+# 规格合并分析 - 分组策略配置
+# 定义不同的分组维度和分析单位
+
+project:
+  name: "镀锡规格合并可行性分析"
+  description: "支持多种分组维度的统一分析框架"
+  version: "3.0"
+
+# ============================================================
+# 数据路径配置
+# ============================================================
+data:
+  input_file: "result/data/feature_engineered_data/featured_data.xlsx"
+  output_dir: "result/spec_group_merge_analysis"
+
+# ============================================================
+# 列名定义（与数据源对应）
+# ============================================================
+columns:
+  setpoint:
+    top: "Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min"
+    bot: "Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min"
+  
+  actual_weight:
+    top: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+    bot: "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+  
+  features:
+    - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg"
+    - "Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg"
+    - "Dimension_[mm]_Width"
+    - "Speed[m/min]_Process_Avg"
+    - "Top_Current_Sum"
+    - "Bot_Current_Sum"
+    - "Dimension_[mm]_Thickness"
+  
+  delta:
+    top: "Top_Delta"
+    bot: "Bot_Delta"
+
+# ============================================================
+# 分组策略定义
+# ============================================================
+grouping_strategies:
+  
+  # 策略 1：表面设定值档（v3 - 当前主流）
+  surface_setpoint_level:
+    enabled: true
+    description: "按表面设定值档分组（同表面按设定值分档，不区分另一面设定值）"
+    type: "surface_setpoint_level"
+    
+    # 维度定义
+    dimensions:
+      - name: "surface"
+        values: ["Top", "Bot"]
+        description: "分析表面"
+      
+      - name: "setpoint_value"
+        source_column_map:
+          Top: "columns.setpoint.top"
+          Bot: "columns.setpoint.bot"
+        description: "该表面的设定值"
+    
+    # 分析单位标签格式
+    unit_label_format: "{surface}{setpoint_value}"
+    
+    # 二维分析的层级结构
+    analysis_layers:
+      layer1:
+        name: "档内组合并档检验"
+        description: "同一设定值档内，不同另一面设定值的组合能否并档"
+        enabled: true
+      
+      layer2:
+        name: "档间合并检验"
+        description: "不同设定值档之间能否合并"
+        enabled: true
+      
+      layer3:
+        name: "全局基线（参考用）"
+        description: "全局模型 vs 各档独立模型对比"
+        enabled: true
+  
+  # 策略 2：规格组笛卡尔积（v2 - 精细对比）
+  spec_group_cartesian:
+    enabled: true
+    description: "Top×Bot 规格组的笛卡尔积（完整组合，用于精细对比）"
+    type: "spec_group_cartesian"
+    
+    # 维度定义
+    dimensions:
+      - name: "top_setpoint"
+        source_column: "columns.setpoint.top"
+        description: "Top 表面设定值"
+      
+      - name: "bot_setpoint"
+        source_column: "columns.setpoint.bot"
+        description: "Bot 表面设定值"
+    
+    # 分析单位标签格式
+    unit_label_format: "Top{top_setpoint}_Bot{bot_setpoint}"
+    
+    # 单层分析（无档内/档间的递进关系）
+    analysis_layers:
+      layer1:
+        name: "规格组两两检验"
+        description: "规格组间能否共用模型（可按表面独立判定或共用判定）"
+        enabled: true
+        
+        # 是否分表面进行判定
+        split_by_surface: true
+        # 若为true，则分别对Top表面和Bot表面做判定
+        # 若为false，则作为一个整体规格组判定
+
+# ============================================================
+# 分析参数（跨策略通用）
+# ============================================================
+analysis_parameters:
+  
+  # 数据筛选
+  min_level_samples: 100          # 分析单位最小样本量（探索用）
+  min_formal_samples: 200         # 正式建模的样本量门槛
+  min_subgroup_samples: 30        # 层1中参与检验的组合最少样本
+  min_pair_samples: 20            # 层2中单个单位的最少有效样本
+  
+  # 规格距离限制
+  spec_distance:
+    absolute_limit: 2.0           # 绝对差上限（g/m²）
+    relative_limit: 0.5           # 相对差上限：|a-b| / min(a,b)
+  
+  # 统计检验
+  ks_test:
+    p_threshold: 0.05             # KS p > threshold 视为无显著差异
+  
+  # 非劣效判定（交叉验证）
+  non_inferiority:
+    summary_margin: 0.03          # 汇总 RMSE 允许变差（相对） - 改为 50%
+    per_unit_margin: 0.03         # 每个单位允许变差（相对） - 改为 50%
+    ci_percentile: 95             # Bootstrap 置信区间百分位数（单侧）
+    sample_imbalance_ratio: 5.0   # 样本比例 > threshold 标注为不平衡
+  
+  # 交叉验证配置
+  cross_validation:
+    cv_splits: 3                  # K折
+    cv_repeats: 2                 # 重复次数
+    bootstrap_n: 1000             # Bootstrap 重抽样次数
+  
+  # 模型参数
+  model:
+    type: "HistGradientBoosting"
+    max_depth: 3
+    learning_rate: 0.05
+    iter_grid: [30, 50, 75, 100, 150, 200, 300]
+    random_state: 42
+    model_threads: 1              # 每个模型单线程
+    n_jobs: -1                    # 并行进程数：-1 = 全部核心
+
+# ============================================================
+# 输出配置
+# ============================================================
+output:
+  
+  # 是否为每个策略生成独立的输出子目录
+  organize_by_strategy: true
+  
+  # 共享输出文件（策略无关）
+  shared_files:
+    - "merge_candidates.csv"
+    - "level_composition.csv"
+    - "level_pooling_summary.csv"
+    - "merge_validation_summary.csv"
+  
+  # 策略特定的输出文件
+  strategy_specific_files:
+    - "level_pooling_results.json"
+    - "merge_validation_results.json"
+    - "global_baseline_summary.csv"
+  
+  # 是否生成对比分析报告
+  generate_comparison_report: true
+  comparison_report_file: "comparison_report.md"
+
+# ============================================================
+# 运行配置
+# ============================================================
+runtime:
+  verbose: true                   # 详细日志输出
+  log_level: "INFO"               # 日志级别：DEBUG / INFO / WARNING / ERROR
+  n_jobs_strategy: -1             # 并行进程数：-1=全部核心，1=串行

@@ -1,368 +1,354 @@
 """
-【阶段 A：规格组合并可行性初步筛选】
+【阶段 A：按分组策略的合并初筛】
 
-使用 KS 检验快速判断规格组间的测量误差分布是否相同。
-这是判断两个规格组是否能合并建模的必要条件。
+通用逻辑：
+  1. 使用 GroupingStrategy 构建分析单位表
+  2. 对分析单位两两做 KS 检验（比较目标变量的分布）
+  3. 计算分析单位间的距离（取决于策略定义）
+  4. 输出合并候选对
 
-步骤：
-1. 加载特征工程后的数据
-2. 按规格组分类
-3. 计算每个规格组的 Delta（实际 - 在线）分布
-4. 对所有规格组对进行 KS 检验
-5. 输出可能合并的候选对（按优先级排序）
+支持多种分组策略：
+  - surface_setpoint_level: 按表面设定值档分组
+  - spec_group_cartesian: Top×Bot 规格组笛卡尔积
+  - 其他自定义策略
 """
 
-import pandas as pd
-import numpy as np
-from scipy.stats import ks_2samp
 import itertools
 import os
-import yaml
+import logging
 
-# ===== 从 coating_model_by_group.py 复用的常量 =====
-TOP_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min'
-BOT_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min'
+import numpy as np
+import pandas as pd
+from scipy.stats import ks_2samp
 
-# 配置
-MIN_GROUP_SAMPLES = 100  # 规格组最小样本量
-KS_P_THRESHOLD = 0.05   # KS 检验 p-value 阈值（> 0.05 说明分布相同）
+logger = logging.getLogger(__name__)
 
 
-def load_config(config_path="config.yaml"):
-    """加载配置文件"""
-    if not os.path.exists(config_path):
-        print(f"⚠ 警告: 配置文件 {config_path} 不存在，使用默认数据路径")
-        return {}
+def load_featured_data(cfg) -> pd.DataFrame:
+    """从配置加载特征工程数据"""
+    logger.info("[步骤 1] 加载特征工程数据...")
     
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config or {}
-
-
-def load_featured_data(config_path="config.yaml") -> pd.DataFrame:
-    """加载特征工程后的数据"""
-    print("\n" + "="*70)
-    print("【阶段 A：规格组合并初筛】")
-    print("="*70)
+    input_file = cfg.get_input_file()
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(
+            f"未找到特征工程数据: {input_file}\n"
+            f"请先运行 new_data_pipeline.py 或 analyse_data_final.py"
+        )
     
-    print("\n[步骤 1] 加载特征工程数据...")
-    
-    # 加载配置
-    config = load_config(config_path)
-    
-    # 获取数据路径（与 coating_model_by_group.py 一致）
-    excel_path = config.get("data_paths", {}).get("clean_data", "result/data/feature_engineered_data/featured_data.xlsx")
-    
-    if not os.path.exists(excel_path):
-        raise FileNotFoundError(f"未找到特征工程数据: {excel_path}\n请先运行 new_data_pipeline.py 或 analyse_data_final.py")
-    
-    df = pd.read_excel(excel_path)
-    print(f"✓ 数据加载: {len(df)} 行, {df.shape[1]} 列")
-    print(f"  路径: {excel_path}")
-    
+    df = pd.read_excel(input_file)
+    logger.info(f"✓ 数据加载: {len(df)} 行, {df.shape[1]} 列")
+    logger.info(f"  路径: {input_file}")
     return df
 
 
-def build_spec_groups(df) -> pd.DataFrame:
-    """构建规格组标签（复用 coating_model_by_group.py 的逻辑）"""
-    df = df.copy()
+def check_columns(df, cfg) -> None:
+    """检查必要的列是否存在"""
+    setpoint_cols = cfg.get_setpoint_columns()
+    delta_cols = cfg.get_delta_columns()
     
-    if TOP_SETPOINT_COL not in df.columns or BOT_SETPOINT_COL not in df.columns:
-        raise KeyError(f"缺少分组所需字段: {TOP_SETPOINT_COL} 或 {BOT_SETPOINT_COL}")
-    
-    df['Setpoint_Group_Key'] = list(zip(df[TOP_SETPOINT_COL], df[BOT_SETPOINT_COL]))
-    df['Setpoint_Group_Label'] = df.apply(
-        lambda r: f"Top{r[TOP_SETPOINT_COL]}_Bot{r[BOT_SETPOINT_COL]}", axis=1
-    )
-    return df
+    need = list(setpoint_cols.values()) + list(delta_cols.values())
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        raise KeyError(f"缺少必要字段: {missing}")
 
 
-def compute_delta_columns(df) -> pd.DataFrame:
+def build_units_with_strategy(df, strategy, cfg) -> pd.DataFrame:
+    """使用策略构建分析单位表"""
+    logger.info("[步骤 2] 构建分析单位...")
+    
+    units = strategy.build_analysis_units(df)
+    
+    # 记录统计信息
+    logger.info(f"✓ 共 {len(units)} 个分析单位")
+    total_samples = units['n_samples'].sum()
+    logger.info(f"  覆盖 {total_samples}/{len(df)} 行（{total_samples/len(df)*100:.1f}%）")
+    
+    # 按是否达到最小样本量统计
+    min_samples = cfg.get_analysis_parameter('min_level_samples')
+    eligible = units[units['n_samples'] >= min_samples]
+    logger.info(f"  达标（≥{min_samples}）: {len(eligible)} 个")
+    
+    return units
+
+
+def spec_distances(value_A: float, value_B: float, cfg) -> tuple:
+    """计算两个值之间的绝对差和相对差"""
+    abs_limit = cfg.get_analysis_parameter('spec_distance.absolute_limit')
+    rel_limit = cfg.get_analysis_parameter('spec_distance.relative_limit')
+    
+    abs_d = round(abs(value_A - value_B), 6)
+    rel_d = round(abs_d / min(value_A, value_B), 6) if min(value_A, value_B) > 0 else float('inf')
+    
+    within = bool(abs_d <= abs_limit and rel_d <= rel_limit)
+    
+    return abs_d, rel_d, within, abs_limit, rel_limit
+
+
+def perform_ks_tests(df, units: pd.DataFrame, strategy, cfg) -> list:
     """
-    检查 Delta 列是否存在（应该在特征工程时已生成）
-    Delta 列名: Top_Delta, Bot_Delta（不是 Delta_Top, Delta_Bot）
+    对分析单位两两做 KS 检验。
+    
+    对于表面设定值档策略：
+      - 按表面分别进行，比较同一表面不同档的 Delta 分布
+    对于规格组笛卡尔积策略：
+      - 比较不同规格组的 Top/Bot Delta 分布（或混合）
     """
-    df = df.copy()
+    logger.info("[步骤 3] KS 检验单位间分布差异...")
     
-    for surface in ['Top', 'Bot']:
-        delta_col = f'{surface}_Delta'  # 正确的列名格式
-        
-        if delta_col not in df.columns:
-            print(f"⚠ 警告: 缺少 {surface} 表面的列 {delta_col}")
-            print(f"  这个列应该在特征工程时生成")
+    min_samples = cfg.get_analysis_parameter('min_level_samples')
+    ks_threshold = cfg.get_analysis_parameter('ks_test.p_threshold')
+    setpoint_cols = strategy.get_setpoint_columns()
+    delta_cols = cfg.get_delta_columns()
     
-    return df
-
-
-def summarize_groups(df) -> pd.DataFrame:
-    """打印规格组统计信息"""
-    print("\n[步骤 4] 规格组统计...")
+    # 筛选达标的单位
+    eligible_units = units[units['n_samples'] >= min_samples].copy()
     
-    group_sizes = df.groupby('Setpoint_Group_Label').size().sort_values(ascending=False)
-    
-    valid_groups = group_sizes[group_sizes >= MIN_GROUP_SAMPLES]
-    skipped_groups = group_sizes[group_sizes < MIN_GROUP_SAMPLES]
-    
-    print(f"\n  共 {len(group_sizes)} 个规格组")
-    print(f"  ✓ 达标（≥{MIN_GROUP_SAMPLES}）: {len(valid_groups)} 个")
-    print(f"  ✗ 跳过（<{MIN_GROUP_SAMPLES}）: {len(skipped_groups)} 个\n")
-    
-    print(f"  {'规格组':<25} {'样本数':>8} 状态")
-    print("  " + "-"*50)
-    for label, size in valid_groups.items():
-        print(f"  {label:<25} {size:>8} ✓ 建模")
-    for label, size in skipped_groups.items():
-        print(f"  {label:<25} {size:>8} ✗ 跳过")
-    
-    return df[df['Setpoint_Group_Label'].isin(valid_groups.index)].copy()
-
-
-def parse_spec_values(group_label: str) -> tuple:
-    """
-    从规格组标签解析 Top 和 Bot 的镇锡厚度设定值
-    例：'Top2.0_Bot2.0' → (2.0, 2.0)
-    """
-    parts = group_label.split('_')
-    top_val = float(parts[0].replace('Top', ''))
-    bot_val = float(parts[1].replace('Bot', ''))
-    return top_val, bot_val
-
-
-def compute_spec_distance(group_A: str, group_B: str) -> float:
-    """
-    计算两个规格组之间的欧氏距离
-    
-    参数：
-      group_A: 'Top2.0_Bot2.0'
-      group_B: 'Top2.799_Bot2.799'
-    
-    返回：两个规格组的欧氏距离
-    """
-    top_A, bot_A = parse_spec_values(group_A)
-    top_B, bot_B = parse_spec_values(group_B)
-    
-    distance = np.sqrt((top_A - top_B)**2 + (bot_A - bot_B)**2)
-    return distance
-
-
-def perform_ks_tests(df) -> list:
-    """
-    对所有规格组对进行 KS 检验（优化版 v2）
-    
-    改进点：
-    1. KS 检验作为参考而非硬性过滤
-    2. 保留所有候选对（包括边界情况）
-    3. 添加详细的分布诊断信息
-    4. 新增：规格距离计算（支持规格接近度排序）
-    5. 新增：分表面的规格接近度分析
-    
-    返回候选合并对列表
-    """
-    print("\n[步骤 5] KS 检验测量误差分布...")
-    
-    group_labels = sorted(df['Setpoint_Group_Label'].unique())
     candidates = []
     
-    # 对每个表面（Top/Bot）分别进行检验
-    for surface in ['Top', 'Bot']:
-        delta_col = f'{surface}_Delta'  # 正确的列名格式
-        
-        if delta_col not in df.columns:
-            print(f"⚠ 跳过 {surface} 表面（缺少 {delta_col} 列）")
-            continue
-        
-        print(f"\n  ──────── {surface} 表面 ────────")
-        
-        for group_A, group_B in itertools.combinations(group_labels, 2):
-            delta_A = df[df['Setpoint_Group_Label'] == group_A][delta_col].dropna()
-            delta_B = df[df['Setpoint_Group_Label'] == group_B][delta_col].dropna()
-            
-            if len(delta_A) < 10 or len(delta_B) < 10:
-                continue  # 样本太少，跳过
-            
-            # 执行 KS 检验
-            stat, p_value = ks_2samp(delta_A, delta_B)
-            
-            # 判断 KS 检验是否通过（p > 0.05）
-            ks_pass = p_value > KS_P_THRESHOLD
-            
-            # 计算分布相似度指标
-            mean_diff = abs(delta_A.mean() - delta_B.mean())
-            std_diff = abs(delta_A.std() - delta_B.std())
-            
-            # 【新增】计算规格距离
-            spec_distance = compute_spec_distance(group_A, group_B)
-            
-            # 构建候选对记录
-            candidate = {
-                'surface': surface,
-                'group_A': group_A,
-                'group_B': group_B,
-                'p_value': p_value,
-                'stat': stat,
-                'ks_pass': ks_pass,
-                'size_A': len(delta_A),
-                'size_B': len(delta_B),
-                'mean_A': delta_A.mean(),
-                'mean_B': delta_B.mean(),
-                'mean_diff': mean_diff,
-                'std_A': delta_A.std(),
-                'std_B': delta_B.std(),
-                'std_diff': std_diff,
-                'merged_size': len(delta_A) + len(delta_B),
-                'spec_distance': spec_distance,  # 【新增】规格距离
-                'ks_interpretation': f"{'✓ 分布相同' if ks_pass else '✗ 分布不同'} (p={p_value:.4f})"
-            }
-            
-            candidates.append(candidate)
+    # 按策略类型分别处理
+    strategy_type = strategy.get_strategy_type()
     
-    # 【优化】按优先级排序：
-    # 1. 优先 KS 通过的对
-    # 2. 其次按规格接近度排序（规格相近更可能合并）
-    # 3. 第三按样本量排序（样本多更稳定）
-    candidates = sorted(
-        candidates, 
-        key=lambda x: (
-            not x['ks_pass'],           # 第一优先级：KS 通过
-            x['spec_distance'],         # 第二优先级：规格接近（升序）
-            -min(x['size_A'], x['size_B'])  # 第三优先级：样本量多（降序）
-        )
-    )
+    if strategy_type == 'surface_setpoint_level':
+        # 表面设定值档策略：按表面分别处理
+        for surface in eligible_units['surface'].unique():
+            surface_units = eligible_units[eligible_units['surface'] == surface].sort_values('unit_key')
+            logger.debug(f"  处理 {surface} 表面: {len(surface_units)} 个单位")
+            
+            setpoint_col = setpoint_cols.get(surface)
+            delta_col = delta_cols.get(surface)
+            
+            if setpoint_col is None or delta_col is None:
+                logger.warning(f"  跳过 {surface} 表面（缺少列定义）")
+                continue
+            
+            # 预加载每个单位的 Delta 向量
+            deltas = {}
+            for _, unit in surface_units.iterrows():
+                # 对于表面设定值档策略，unit_key 形如 "Top2.799"
+                if surface in unit['unit_key']:
+                    # 提取设定值数值部分
+                    value = unit.get('setpoint_value')
+                    if pd.notna(value):
+                        delta_vec = df.loc[df[setpoint_col] == value, delta_col].dropna()
+                        deltas[unit['unit_key']] = delta_vec
+            
+            # 两两 KS 检验
+            for (_, uA), (_, uB) in itertools.combinations(surface_units.iterrows(), 2):
+                dA = deltas.get(uA['unit_key'])
+                dB = deltas.get(uB['unit_key'])
+                
+                if dA is None or dB is None or len(dA) < 10 or len(dB) < 10:
+                    continue
+                
+                stat, p = ks_2samp(dA, dB)
+                
+                # 计算距离
+                val_A = uA.get('setpoint_value')
+                val_B = uB.get('setpoint_value')
+                abs_d, rel_d, within, abs_limit, rel_limit = spec_distances(val_A, val_B, cfg)
+                
+                candidates.append({
+                    'surface': surface,
+                    'unit_A': uA['unit_key'],
+                    'unit_B': uB['unit_key'],
+                    'value_A': val_A,
+                    'value_B': val_B,
+                    'p_value': p,
+                    'stat': stat,
+                    'ks_pass': bool(p > ks_threshold),
+                    'size_A': int(len(dA)),
+                    'size_B': int(len(dB)),
+                    'merged_size': int(len(dA) + len(dB)),
+                    'mean_A': dA.mean(),
+                    'mean_B': dB.mean(),
+                    'mean_diff': abs(dA.mean() - dB.mean()),
+                    'std_A': dA.std(),
+                    'std_B': dB.std(),
+                    'spec_distance': abs_d,
+                    'rel_distance': rel_d,
+                    'abs_limit': abs_limit,
+                    'rel_limit': rel_limit,
+                    'within_limit': within,
+                })
+    else:
+        # 规格组笛卡尔积策略：直接两两比较
+        # 对于每对单位，比较两个 Top×Bot 规格组合的合并 Delta 分布
+        logger.debug(f"  处理规格组策略: {len(eligible_units)} 个单位")
+        
+        top_setpoint_col = setpoint_cols.get('Top')
+        bot_setpoint_col = setpoint_cols.get('Bot')
+        delta_col = delta_cols.get('Top')  # 使用 Top Delta 作为代表
+        
+        if top_setpoint_col is None or bot_setpoint_col is None or delta_col is None:
+            logger.warning("  规格组策略缺少列定义，跳过 KS 检验")
+        else:
+            # 预加载每个单位的 Delta 向量（按该单位的 Top/Bot 值过滤）
+            deltas = {}
+            for _, unit in eligible_units.iterrows():
+                top_val = unit.get('top_setpoint')
+                bot_val = unit.get('bot_setpoint')
+                
+                if pd.notna(top_val) and pd.notna(bot_val):
+                    # 只取该规格组合的样本
+                    mask = (df[top_setpoint_col] == top_val) & (df[bot_setpoint_col] == bot_val)
+                    delta_vec = df.loc[mask, delta_col].dropna()
+                    if len(delta_vec) > 0:
+                        deltas[unit['unit_key']] = delta_vec
+            
+            # 两两 KS 检验
+            for (_, uA), (_, uB) in itertools.combinations(eligible_units.iterrows(), 2):
+                dA = deltas.get(uA['unit_key'])
+                dB = deltas.get(uB['unit_key'])
+                
+                if dA is None or dB is None or len(dA) < 10 or len(dB) < 10:
+                    continue
+                
+                stat, p = ks_2samp(dA, dB)
+                
+                # 计算规格距离（同时考虑 Top 和 Bot 的差异）
+                top_diff = abs(uA.get('top_setpoint') - uB.get('top_setpoint'))
+                bot_diff = abs(uA.get('bot_setpoint') - uB.get('bot_setpoint'))
+                abs_d = max(top_diff, bot_diff)  # 取最大差异
+                
+                # 相对差异基于较小值
+                min_top = min(uA.get('top_setpoint', 1), uB.get('top_setpoint', 1))
+                rel_d = abs_d / min_top if min_top > 0 else float('inf')
+                
+                abs_limit = cfg.get_analysis_parameter('spec_distance.absolute_limit')
+                rel_limit = cfg.get_analysis_parameter('spec_distance.relative_limit')
+                within = bool(abs_d <= abs_limit and rel_d <= rel_limit)
+                
+                candidates.append({
+                    'surface': 'Both',
+                    'unit_A': uA['unit_key'],
+                    'unit_B': uB['unit_key'],
+                    'value_A': f"Top{uA.get('top_setpoint'):.3f}_Bot{uA.get('bot_setpoint'):.3f}",
+                    'value_B': f"Top{uB.get('top_setpoint'):.3f}_Bot{uB.get('bot_setpoint'):.3f}",
+                    'p_value': p,
+                    'stat': stat,
+                    'ks_pass': bool(p > ks_threshold),
+                    'size_A': int(len(dA)),
+                    'size_B': int(len(dB)),
+                    'merged_size': int(len(dA) + len(dB)),
+                    'mean_A': dA.mean(),
+                    'mean_B': dB.mean(),
+                    'mean_diff': abs(dA.mean() - dB.mean()),
+                    'std_A': dA.std(),
+                    'std_B': dB.std(),
+                    'spec_distance': abs_d,
+                    'rel_distance': rel_d,
+                    'abs_limit': abs_limit,
+                    'rel_limit': rel_limit,
+                    'within_limit': within,
+                })
+    
+    candidates.sort(key=lambda x: (not x['within_limit'], not x['ks_pass'], x['spec_distance']))
+    logger.info(f"✓ 共生成 {len(candidates)} 个候选对")
     
     return candidates
 
 
-def print_ks_results(candidates: list):
-    """
-    打印 KS 检验结果（优化版 v2）
+def print_ks_results(candidates: list, cfg):
+    """打印 KS 检验结果摘要"""
+    abs_limit = cfg.get_analysis_parameter('spec_distance.absolute_limit')
+    rel_limit = cfg.get_analysis_parameter('spec_distance.relative_limit')
     
-    【新增】：显示规格距离的分析
-    """
-    print("\n" + "="*100)
-    print("【KS 检验结果 - 规格组合并候选对分析（按规格距离优先）】")
-    print("="*100)
+    logger.info("\n" + "=" * 100)
+    logger.info("【KS 检验结果 - 单位间合并候选对】")
+    logger.info("=" * 100)
     
     if not candidates:
-        print("\n✗ 未发现可能的合并候选对")
+        logger.info("\n✗ 未发现候选对")
         return
     
-    # 分类显示
-    ks_pass = [c for c in candidates if c['ks_pass']]
-    ks_fail = [c for c in candidates if not c['ks_pass']]
+    logger.info(f"\n总计 {len(candidates)} 个候选对")
+    logger.info(f"  规格距离限制: 绝对差 ≤ {abs_limit} g/m² 且 相对差 ≤ {rel_limit:.0%}")
     
-    print(f"\n总计 {len(candidates)} 个候选对")
-    print(f"  ✓ KS 通过（分布相同）: {len(ks_pass)} 对")
-    print(f"  ○ KS 未通过（分布略异）: {len(ks_fail)} 对")
+    # 按表面统计
+    for surface in set(c.get('surface') for c in candidates if c.get('surface')):
+        s = [c for c in candidates if c.get('surface') == surface]
+        w = [c for c in s if c['within_limit']]
+        kp = [c for c in w if c['ks_pass']]
+        logger.info(f"  · {surface}: 共 {len(s)} 对，限内 {len(w)} 对"
+                   f"（其中 KS 通过 {len(kp)} 对），超限 {len(s) - len(w)} 对")
     
-    # 【新增】按规格距离统计
-    spec_dist_analysis = {
-        'very_close': [c for c in candidates if c.get('spec_distance', 2.0) < 0.5],
-        'close': [c for c in candidates if 0.5 <= c.get('spec_distance', 2.0) < 0.8],
-        'medium': [c for c in candidates if 0.8 <= c.get('spec_distance', 2.0) < 1.5],
-        'far': [c for c in candidates if c.get('spec_distance', 2.0) >= 1.5]
-    }
+    within = [c for c in candidates if c['within_limit']]
+    logger.info("\n" + "-" * 100)
+    logger.info(f"【限内候选对（将进入阶段 B 检验）】共 {len(within)} 对")
+    logger.info("-" * 100)
     
-    print(f"\n规格距离分布：")
-    print(f"  · 非常接近 (<0.5): {len(spec_dist_analysis['very_close'])} 对 (最有希望)")
-    print(f"  · 接近 (0.5-0.8): {len(spec_dist_analysis['close'])} 对")
-    print(f"  · 中等 (0.8-1.5): {len(spec_dist_analysis['medium'])} 对")
-    print(f"  · 差异大 (>1.5): {len(spec_dist_analysis['far'])} 对 (难以合并)")
-    
-    # 显示 KS 通过的对（按规格距离排序）
-    if ks_pass:
-        print("\n" + "-"*100)
-        print("【优先级 1：KS 分布检验通过（按规格接近度排序）】")
-        print("-"*100)
-        
-        ks_pass_sorted = sorted(ks_pass, key=lambda x: x.get('spec_distance', 2.0))
-        for i, cand in enumerate(ks_pass_sorted, 1):
-            print(f"\n{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
-            print(f"   规格距离: {cand.get('spec_distance', 0):.3f} g/m² (欧氏距离)")
-            print(f"   样本数: {cand['size_A']:>4} + {cand['size_B']:>4} = {cand['merged_size']}")
-            print(f"   均值: {cand['mean_A']:>8.4f} vs {cand['mean_B']:>8.4f}  (差异: {cand['mean_diff']:.4f})")
-            print(f"   KS 检验: p={cand['p_value']:.6f} ✓")
-    
-    # 显示 KS 未通过但规格接近的对
-    close_but_ks_fail = [c for c in ks_fail if c.get('spec_distance', 2.0) < 1.0]
-    if close_but_ks_fail:
-        print("\n" + "-"*100)
-        print("【优先级 2：KS 未通过但规格接近（进入 Phase B 快速检查）】")
-        print("-"*100)
-        
-        close_sorted = sorted(close_but_ks_fail, key=lambda x: x.get('spec_distance', 2.0))
-        for i, cand in enumerate(close_sorted[:10], 1):  # 只显示前10个
-            print(f"\n{i}. {cand['surface']} 表面: {cand['group_A']} + {cand['group_B']}")
-            print(f"   规格距离: {cand.get('spec_distance', 0):.3f} g/m²")
-            print(f"   样本数: {cand['size_A']:>4} + {cand['size_B']:>4} = {cand['merged_size']}")
-            print(f"   KS 检验: p={cand['p_value']:.6f} (接近但未通过)")
-        
-        if len(close_sorted) > 10:
-            print(f"\n... 共 {len(close_sorted)} 对")
-    
-    print(f"\n【优先级 3：KS 检验失败且规格差异大（直接排除）】")
-    print(f"  共 {len(spec_dist_analysis['far'])} 对规格距离 > 1.5 的候选")
-    print()
+    for i, c in enumerate(within, 1):
+        mark = "KS ✓" if c['ks_pass'] else "KS ✗"
+        logger.info(f"{i:>3}. {c.get('surface', 'N/A')}: {c['unit_A']:<15} + {c['unit_B']:<15} "
+                   f"绝对差 {c['spec_distance']:.3f} / 相对差 {c['rel_distance']:.0%}  "
+                   f"样本 {c['size_A']}+{c['size_B']}  p={c['p_value']:.4f} {mark}")
 
 
-def export_candidates_to_csv(candidates: list, output_path: str = "result/spec_group_merge_analysis/merge_candidates.csv"):
-    """导出候选对到 CSV（包含规格距离）"""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+def export_outputs(candidates: list, units: pd.DataFrame, result_dir: str):
+    """导出候选对和单位构成表"""
+    os.makedirs(result_dir, exist_ok=True)
     
-    df_cand = pd.DataFrame(candidates)
-    # 【新增】按规格距离和 KS 通过状态排序
-    df_cand = df_cand.sort_values(['ks_pass', 'spec_distance'], ascending=[False, True])
-    df_cand.to_csv(output_path, index=False, encoding='utf-8')
+    candidates_file = os.path.join(result_dir, 'merge_candidates.csv')
+    units_file = os.path.join(result_dir, 'level_composition.csv')
     
-    print(f"\n✓ 候选合并对已导出至: {output_path}")
-    print(f"  （按 KS 通过状态和规格距离排序，规格相近的对优先）")
-    return df_cand
+    pd.DataFrame(candidates).to_csv(candidates_file, index=False, encoding='utf-8')
+    units.to_csv(units_file, index=False, encoding='utf-8-sig')
+    
+    logger.info(f"✓ 候选对已导出: {candidates_file}")
+    logger.info(f"✓ 分析单位已导出: {units_file}")
 
 
-def main():
-    """主流程"""
-    config_path = "config.yaml"
+def main(strategy, cfg, result_dir: str):
+    """
+    阶段 A 主函数
+    
+    Args:
+        strategy: GroupingStrategy 实例
+        cfg: ConfigManager 实例
+        result_dir: 结果输出目录
+    """
+    logger.info("\n" + "=" * 70)
+    logger.info("【阶段 A：分析单位筛选与 KS 检验】")
+    logger.info("=" * 70)
     
     try:
-        # 1. 加载特征工程后的数据
-        df = load_featured_data(config_path)
+        # 加载数据
+        df = load_featured_data(cfg)
+        check_columns(df, cfg)
         
-        # 2. 构建规格组
-        df = build_spec_groups(df)
+        # 构建分析单位
+        units = build_units_with_strategy(df, strategy, cfg)
         
-        # 3. 计算 Delta
-        df = compute_delta_columns(df)
+        # KS 检验
+        candidates = perform_ks_tests(df, units, strategy, cfg)
         
-        # 4. 规格组统计
-        df_valid = summarize_groups(df)
+        # 打印结果
+        print_ks_results(candidates, cfg)
         
-        # 5. KS 检验
-        candidates = perform_ks_tests(df_valid)
+        # 导出输出
+        export_outputs(candidates, units, result_dir)
         
-        # 6. 打印结果
-        print_ks_results(candidates)
+        logger.info("\n" + "=" * 70)
+        logger.info("【阶段 A 完成】")
+        logger.info("=" * 70)
+        logger.info("\n后续步骤: 阶段 B（交叉验证与非劣效判定）\n")
         
-        # 7. 导出到 CSV
-        if candidates:
-            export_candidates_to_csv(candidates)
-        
-        print("\n" + "="*70)
-        print("【阶段 A 完成】")
-        print("="*70)
-        print("\n阶段 A 的作用:")
-        print("  ✓ 快速筛选 Delta 分布相同的规格组对")
-        print("  ✓ KS 通过的对优先级高，但不是硬性要求")
-        print("  ✓ KS 未通过的对仍可进入 Phase B 进一步检验")
-        print("\n后续步骤:")
-        print("  1. 查看 merge_candidates.csv 了解所有候选对")
-        print("  2. 执行阶段 B（Chow 检验 + 性能对比）进行深入验证")
-        print("  3. Chow 检验会识别出模型系数是否真正相同")
-        print()
-        
+        return True
+    
     except Exception as e:
-        print(f"\n✗ 执行出错: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"\n✗ 阶段 A 执行出错: {e}", exc_info=True)
+        return False
 
 
 if __name__ == '__main__':
-    main()
+    # 独立运行测试（用于调试）
+    from config_manager import ConfigManager
+    from grouping_strategies import create_strategy
+    
+    cfg = ConfigManager("grouping_config.yaml")
+    strategy_type = cfg.get_strategy_type('surface_setpoint_level')
+    cols = cfg.get_columns_for_strategy('surface_setpoint_level')
+    strategy = create_strategy(strategy_type, cols['setpoint'])
+    result_dir = "result/spec_group_merge_analysis"
+    
+    main(strategy, cfg, result_dir)

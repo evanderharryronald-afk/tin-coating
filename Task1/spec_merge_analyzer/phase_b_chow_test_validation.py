@@ -1,483 +1,516 @@
+# -*- coding: utf-8 -*-
 """
-【阶段 B：规格组合并验证（最终版本 - 改进决策逻辑）】
+【阶段 B：交叉验证与非劣效判定】
 
-【核心改进】：
-1. 决策条件改为 OR 逻辑：Chow 通过 OR 性能提升
-2. 样本量不平衡检查：比例 > 5:1 时标记为可能不可靠
-3. 规格距离硬性约束：> 1.0 的对直接排除
-4. 支持可配置的性能损失容限
-5. 增强诊断信息：标记样本不平衡、统计不可靠等
+三层分析（根据策略分层）：
+  - 层1【档内并档检验】：同一档内，不同另一面设定值的组合能否并档
+  - 层2【档间合并检验】：不同档之间能否合并  
+  - 层3【全局基线】：全局模型 vs 各档独立模型（仅供参考）
 
-决策矩阵：
-  ✓ YES: (Chow p > 阈值) OR (性能提升 > 3%)
-  ✗ NO:  (Chow p ≤ 阈值) AND (性能损失 ≥ 3%)
-  ⚠️ MAYBE: 边界情况，标记为可信度低
+判定方法：
+  - 折外MSE非劣效（多折交叉验证）
+  - Bootstrap 95% 置信上界
+  - 非劣效边界：汇总 3.0%，单位 5.0%
 """
 
-import pandas as pd
-import numpy as np
-from scipy.stats import f as f_distribution
-import os
 import json
-import yaml
-import time
+import os
+import logging
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.model_selection import cross_val_score, KFold
-from typing import Optional, Tuple, Dict, List
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.model_selection import KFold, RepeatedStratifiedKFold
+from threadpoolctl import threadpool_limits
 
-TOP_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min'
-BOT_SETPOINT_COL = 'Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_BOT_Min'
-
-# ===== 改进的参数 =====
-SPEC_DISTANCE_HARD_LIMIT = 1.0      # 硬性规格距离约束：> 1.0 直接排除
-SAMPLE_IMBALANCE_RATIO = 5.0        # 样本比例 > 5:1 时标记为不平衡
-PERF_GAIN_THRESHOLD = 0.03          # 性能提升 > 3% 时可接受
-PERF_LOSS_THRESHOLD = 0.03          # 性能损失 > 3% 时拒绝
-CHOW_PASS_THRESHOLD = 0.05          # Chow p > 0.05 判定通过
-MIN_SAMPLE_SIZE = 20                # 最小样本量要求
+logger = logging.getLogger(__name__)
 
 
-def parse_spec_values(group_label: str) -> tuple:
-    parts = group_label.split('_')
-    top_val = float(parts[0].replace('Top', ''))
-    bot_val = float(parts[1].replace('Bot', ''))
-    return top_val, bot_val
+def _get_params(cfg):
+    """从配置读取参数"""
+    return {
+        'min_pair_samples': cfg.get_analysis_parameter('min_pair_samples', 20),
+        'sample_imbalance_ratio': cfg.get_analysis_parameter('sample_imbalance_ratio', 5.0),
+        'noninf_margin': cfg.get_analysis_parameter('non_inferiority.summary_margin', 0.03),
+        'per_unit_margin': cfg.get_analysis_parameter('non_inferiority.per_unit_margin', 0.05),
+        'ci_percentile': cfg.get_analysis_parameter('non_inferiority.ci_percentile', 95),
+        'cv_splits': cfg.get_analysis_parameter('cross_validation.cv_splits', 5),
+        'cv_repeats': cfg.get_analysis_parameter('cross_validation.cv_repeats', 3),
+        'bootstrap_n': cfg.get_analysis_parameter('cross_validation.bootstrap_n', 1000),
+        'iter_grid': cfg.get_analysis_parameter('model.iter_grid', [30, 50, 75, 100, 150, 200, 300]),
+        'learning_rate': cfg.get_analysis_parameter('model.learning_rate', 0.05),
+        'max_depth': cfg.get_analysis_parameter('model.max_depth', 3),
+        'random_state': cfg.get_analysis_parameter('model.random_state', 42),
+        'model_threads': cfg.get_analysis_parameter('model.model_threads', 1),
+        'n_jobs': cfg.get_analysis_parameter('model.n_jobs', -1),
+    }
 
 
-def compute_spec_distance(group_A: str, group_B: str) -> float:
-    top_A, bot_A = parse_spec_values(group_A)
-    top_B, bot_B = parse_spec_values(group_B)
-    distance = np.sqrt((top_A - top_B)**2 + (bot_A - bot_B)**2)
-    return distance
+def get_feature_cols(cfg) -> List[str]:
+    """获取特征列"""
+    all_features = cfg.get_feature_columns()
+    if not all_features:
+        logger.warning(f"未配置特征列，将使用所有可用特征")
+    return all_features
 
 
-def get_chow_threshold_by_spec(spec_distance: float) -> float:
-    """基于规格距离的动态阈值"""
-    if spec_distance < 0.5:
-        return 0.05
-    elif spec_distance < 1.0:
-        return 0.02
-    else:
-        return 0.001
-
-
-def get_feature_cols(surface: str) -> list:
-    if surface == 'Top':
-        return [
-            'Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg',
-            'Dimension_[mm]_Width',
-            'Speed[m/min]_Process_Avg',
-            'Top_Current_Sum',
-            'Dimension_[mm]_Thickness'
-        ]
-    else:
-        return [
-            'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg',
-            'Dimension_[mm]_Width',
-            'Speed[m/min]_Process_Avg',
-            'Bot_Current_Sum',
-            'Dimension_[mm]_Thickness'
-        ]
-
-
-def load_config(config_path="config.yaml"):
-    if not os.path.exists(config_path):
-        return {}
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config or {}
-
-
-def load_featured_data(config_path="config.yaml") -> pd.DataFrame:
-    print("\n[加载数据]")
-    config = load_config(config_path)
-    excel_path = config.get("data_paths", {}).get("clean_data", "result/data/feature_engineered_data/featured_data.xlsx")
-    if not os.path.exists(excel_path):
-        raise FileNotFoundError(f"未找到特征工程数据: {excel_path}")
-    df = pd.read_excel(excel_path)
-    print(f"  数据: {len(df)} 行, {df.shape[1]} 列")
-    return df
-
-
-def load_merge_candidates(csv_path: str = "result/spec_group_merge_analysis/merge_candidates.csv") -> pd.DataFrame:
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"未找到候选对文件: {csv_path}")
-    df_cand = pd.read_csv(csv_path)
-    print(f"✓ 加载候选对: {len(df_cand)} 对")
-    return df_cand
-
-
-def check_sample_imbalance(n_A: int, n_B: int) -> Tuple[bool, float, str]:
-    """
-    检查样本不平衡
-    返回: (is_imbalanced, ratio, advice)
-    """
-    ratio = max(n_A, n_B) / min(n_A, n_B)
-    is_imbalanced = ratio > SAMPLE_IMBALANCE_RATIO
-    
-    if is_imbalanced:
-        advice = f"样本比 {ratio:.1f}:1，统计可靠性降低"
-    else:
-        advice = f"样本平衡 ({ratio:.1f}:1)"
-    
-    return is_imbalanced, ratio, advice
-
-
-def build_spec_groups(df) -> pd.DataFrame:
-    df = df.copy()
-    if TOP_SETPOINT_COL not in df.columns or BOT_SETPOINT_COL not in df.columns:
-        raise KeyError(f"缺少分组所需字段")
-    df['Setpoint_Group_Label'] = df.apply(
-        lambda r: f"Top{r[TOP_SETPOINT_COL]}_Bot{r[BOT_SETPOINT_COL]}", axis=1
+def make_model(max_iter: int, cfg):
+    """创建 HistGradientBoosting 模型"""
+    params = _get_params(cfg)
+    return HistGradientBoostingRegressor(
+        max_iter=max_iter,
+        learning_rate=params['learning_rate'],
+        max_depth=params['max_depth'],
+        random_state=params['random_state'],
+        early_stopping=False,
+        verbose=0
     )
-    return df
 
 
-def find_optimal_iterations(X_val: pd.DataFrame, y_val: pd.Series) -> int:
-    if len(X_val) < 20:
-        return 50
-    kf = KFold(n_splits=min(3, len(X_val) // 10), shuffle=True, random_state=42)
-    iter_range = [30, 50, 75, 100, 150]
-    best_iter = 50
-    best_score = -np.inf
+def find_optimal_iterations(X: np.ndarray, y: np.ndarray, cfg) -> int:
+    """用简单的 holdout 选择最优迭代次数"""
+    params = _get_params(cfg)
+    n = len(X)
+    if n < params['min_pair_samples']:
+        return params['iter_grid'][len(params['iter_grid'])//2]
     
-    for max_iter in iter_range:
-        model = HistGradientBoostingRegressor(
-            max_iter=max_iter, learning_rate=0.05, max_depth=3, random_state=42,
-            early_stopping='auto', n_iter_no_change=5, validation_fraction=0.2, tol=1e-4
-        )
-        scores = cross_val_score(model, X_val, y_val, cv=kf, scoring='neg_mean_squared_error')
-        cv_score = scores.mean()
-        if cv_score > best_score:
-            best_score = cv_score
-            best_iter = max_iter
+    kf = KFold(n_splits=max(2, min(3, n // 10)), shuffle=True,
+               random_state=params['random_state'])
+    best_iter, best_score = params['iter_grid'][0], -np.inf
+    model_threads = params['model_threads']
+    
+    for max_iter in params['iter_grid']:
+        try:
+            model = make_model(max_iter, cfg)
+            from sklearn.model_selection import cross_val_score
+            
+            with threadpool_limits(limits=model_threads):
+                scores = cross_val_score(model, X, y, cv=kf, scoring='neg_mean_squared_error', n_jobs=1)
+            
+            mean_score = scores.mean()
+            if mean_score > best_score + 1e-12:
+                best_score, best_iter = mean_score, max_iter
+        except Exception as e:
+            logger.debug(f"迭代次数 {max_iter} 评估失败: {e}")
+            continue
+    
     return best_iter
 
 
-def compute_rss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return np.sum((y_true - y_pred) ** 2)
-
-
-def chow_test_with_aligned_iter_v3(group_A_data: pd.DataFrame, group_B_data: pd.DataFrame,
-                                     surface: str, features: list, target_col: str,
-                                     aligned_iter: int, spec_distance: float = None) -> dict:
-    """Chow 检验 - v3 改进版本"""
+def cv_strategies(X, y, g, iters_sep, iter_pool, cfg):
+    """
+    交叉验证多种建模方案
+    返回 {方案名 -> 每个样本的折外MSE数组}
+    """
+    params = _get_params(cfg)
+    cv_splits = params.get('cv_splits', 5)
+    cv_repeats = params.get('cv_repeats', 3)
+    model_threads = params.get('model_threads', 1)
     
-    mask_A = ~(group_A_data[features].isna().any(axis=1) | group_A_data[target_col].isna())
-    X_A = group_A_data.loc[mask_A, features]
-    y_A = group_A_data.loc[mask_A, target_col]
+    g = np.asarray(g, dtype=int)
+    k = int(g.max()) + 1  # 单位数
+    n = len(y)
+    n_u = np.bincount(g, minlength=k)
     
-    mask_B = ~(group_B_data[features].isna().any(axis=1) | group_B_data[target_col].isna())
-    X_B = group_B_data.loc[mask_B, features]
-    y_B = group_B_data.loc[mask_B, target_col]
+    # 确定实际折数
+    min_samples_per_group = int(n_u.min())
+    n_splits = max(2, min(cv_splits, min_samples_per_group // 2))
     
-    n_A, n_B = len(X_A), len(X_B)
+    rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=cv_repeats,
+                                   random_state=params.get('random_state', 42))
     
-    if n_A < MIN_SAMPLE_SIZE or n_B < MIN_SAMPLE_SIZE:
-        return {
-            'F_stat': np.nan, 'p_value': np.nan, 'can_merge': False,
-            'chow_interpretation': f'样本不足: A={n_A}, B={n_B}'
-        }
+    se_separate = np.zeros((cv_repeats, n))
+    se_pooled = np.zeros((cv_repeats, n))
     
-    # 【新增】样本不平衡检查
-    is_imbalanced, ratio, imbalance_msg = check_sample_imbalance(n_A, n_B)
+    for i, (tr, te) in enumerate(rskf.split(X, g)):
+        r = i // n_splits  # repeat 索引
+        y_te = y[te]
+        
+        # pooled 方案：所有数据混合建模
+        try:
+            with threadpool_limits(limits=model_threads):
+                model = make_model(iter_pool, cfg)
+                model.fit(X[tr], y[tr])
+                pred = model.predict(X[te])
+            
+            # 数值稳定性检查
+            se = (y_te - pred) ** 2
+            if np.any(np.isnan(se)) or np.any(np.isinf(se)):
+                logger.debug(f"Pooled 方案产生非法值: NaN={np.any(np.isnan(se))}, Inf={np.any(np.isinf(se))}")
+                logger.debug(f"  pred 统计: min={np.nanmin(pred):.6f}, max={np.nanmax(pred):.6f}, mean={np.nanmean(pred):.6f}")
+                logger.debug(f"  y_te 统计: min={np.nanmin(y_te):.6f}, max={np.nanmax(y_te):.6f}, mean={np.nanmean(y_te):.6f}")
+                # 用 separate 结果替代
+                se_pooled[r, te] = np.nan  # 标记为缺失，后续会被忽略
+            else:
+                se_pooled[r, te] = se
+        except Exception as e:
+            logger.debug(f"Pooled 方案建模失败: {type(e).__name__}: {e}")
+            se_pooled[r, te] = np.nan  # 改为 NaN 而不是 Inf
+        
+        # separate 方案：各单位分别建模
+        pred = np.zeros(len(te))
+        for u in range(k):
+            tr_mask = g[tr] == u
+            te_mask = g[te] == u
+            
+            if np.sum(tr_mask) > 0 and np.sum(te_mask) > 0:
+                try:
+                    with threadpool_limits(limits=model_threads):
+                        model = make_model(iters_sep[u], cfg)
+                        model.fit(X[tr[tr_mask]], y[tr[tr_mask]])
+                        pred[te_mask] = model.predict(X[te[te_mask]])
+                except Exception as e:
+                    logger.debug(f"单位 {u} 建模失败: {type(e).__name__}: {e}")
+                    pred[te_mask] = np.nanmean(y_te[te_mask])
+        
+        se_separate[r, te] = (y_te - pred) ** 2
     
-    # 训练三个模型
-    model_A = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_A.fit(X_A, y_A)
+    # 处理 NaN 和 Inf 值
+    se_separate = np.where(np.isfinite(se_separate), se_separate, np.nan)
+    se_pooled = np.where(np.isfinite(se_pooled), se_pooled, np.nan)
     
-    model_B = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_B.fit(X_B, y_B)
+    # 对每个样本计算平均，忽略 NaN 值
+    sep_mean = np.nanmean(se_separate, axis=0)
+    pool_mean = np.nanmean(se_pooled, axis=0)
     
-    combined_data = pd.concat([group_A_data, group_B_data], ignore_index=True)
-    mask_AB = ~(combined_data[features].isna().any(axis=1) | combined_data[target_col].isna())
-    X_AB = combined_data.loc[mask_AB, features]
-    y_AB = combined_data.loc[mask_AB, target_col]
-    
-    model_AB = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_AB.fit(X_AB, y_AB)
-    
-    rss_A = compute_rss(y_A.values, model_A.predict(X_A.values))
-    rss_B = compute_rss(y_B.values, model_B.predict(X_B.values))
-    rss_AB = compute_rss(y_AB.values, model_AB.predict(X_AB.values))
-    
-    k = len(features)
-    numerator = (rss_AB - rss_A - rss_B) / k
-    denominator = (rss_A + rss_B) / (n_A + n_B - 2*k)
-    
-    if denominator <= 0:
-        return {
-            'F_stat': np.nan, 'p_value': np.nan, 'can_merge': False,
-            'chow_interpretation': '分母无效'
-        }
-    
-    F_stat = numerator / denominator
-    p_value = 1 - f_distribution.cdf(F_stat, k, n_A + n_B - 2*k)
-    residual_increase = ((rss_AB - rss_A - rss_B) / (rss_A + rss_B)) * 100 if (rss_A + rss_B) > 0 else 0
-    
-    chow_threshold = get_chow_threshold_by_spec(spec_distance) if spec_distance else CHOW_PASS_THRESHOLD
-    chow_passed = p_value > chow_threshold
+    # 如果 pooled 全是 NaN，用 separate 代替
+    if np.all(np.isnan(pool_mean)):
+        logger.debug("Pooled 方案全部失败，使用 separate 方案结果")
+        pool_mean = sep_mean
     
     return {
-        'F_stat': float(F_stat),
-        'p_value': float(p_value),
-        'chow_threshold': float(chow_threshold),
-        'chow_passed': chow_passed,
-        'rmse_A': float(np.sqrt(mean_squared_error(y_A, model_A.predict(X_A)))),
-        'rmse_B': float(np.sqrt(mean_squared_error(y_B, model_B.predict(X_B)))),
-        'rss_A': float(rss_A),
-        'rss_B': float(rss_B),
-        'rss_AB': float(rss_AB),
-        'residual_increase_pct': float(residual_increase),
-        'n_A': int(n_A),
-        'n_B': int(n_B),
-        'sample_ratio': float(ratio),
-        'is_sample_imbalanced': is_imbalanced,
-        'sample_imbalance_msg': imbalance_msg,
-        'aligned_iter': int(aligned_iter),
-        'chow_interpretation': f"p={p_value:.4f} vs {chow_threshold:.4f} {'✓' if chow_passed else '✗'} [{imbalance_msg}]"
+        'separate': sep_mean,
+        'pooled': pool_mean
+    }, int(n_splits)
+
+
+def compare_mse(mse_base, mse_cand, g, cfg) -> dict:
+    """比较基线方案 vs 候选方案的 MSE"""
+    params = _get_params(cfg)
+    bootstrap_n = params['bootstrap_n']
+    ci_percentile = params['ci_percentile']
+    
+    g = np.asarray(g, dtype=int)
+    k = int(g.max()) + 1
+    N = len(g)
+    n_u = np.bincount(g, minlength=k)
+    eps = 1e-18
+    
+    # 计算各单位和汇总的 RMSE
+    base_u = np.array([mse_base[g == u].mean() for u in range(k)])
+    cand_u = np.array([mse_cand[g == u].mean() for u in range(k)])
+    rmse_base = float(np.sqrt((n_u * base_u).sum() / N))
+    rmse_cand = float(np.sqrt((n_u * cand_u).sum() / N))
+    
+    # 相对变化
+    change = rmse_cand / max(rmse_base, eps) - 1.0
+    unit_change = np.sqrt(cand_u / np.maximum(base_u, eps)) - 1.0
+    
+    # Bootstrap 95% 置信上界
+    rng = np.random.default_rng(params['random_state'])
+    bb = np.zeros((k, bootstrap_n))
+    cb = np.zeros((k, bootstrap_n))
+    
+    for u in range(k):
+        idx = np.where(g == u)[0]
+        if len(idx) > 0:
+            sel = idx[rng.integers(0, len(idx), size=(bootstrap_n, len(idx)))]
+            bb[u] = mse_base[sel].mean(axis=1)
+            cb[u] = mse_cand[sel].mean(axis=1)
+    
+    pooled_b = (n_u[:, None] * bb).sum(axis=0) / N
+    pooled_c = (n_u[:, None] * cb).sum(axis=0) / N
+    rel = np.sqrt(pooled_c / np.maximum(pooled_b, eps)) - 1.0
+    unit_rel = np.sqrt(cb / np.maximum(bb, eps)) - 1.0
+    
+    return {
+        'n_u': n_u,
+        'rmse_base': rmse_base,
+        'rmse_cand': rmse_cand,
+        'change': float(change),
+        'upper': float(np.percentile(rel, ci_percentile)),
+        'unit_rmse_base': np.sqrt(base_u),
+        'unit_rmse_cand': np.sqrt(cand_u),
+        'unit_change': unit_change,
+        'unit_upper': np.percentile(unit_rel, ci_percentile, axis=1),
     }
 
 
-def performance_comparison_v3(group_A_data: pd.DataFrame, group_B_data: pd.DataFrame,
-                               surface: str, features: list, target_col: str,
-                               aligned_iter: int) -> dict:
-    """性能对比 - v3 支持性能提升"""
+def decide_noninferiority(res: dict, unit_names: List[str], cfg) -> Tuple[str, str]:
+    """非劣效判定 YES/MAYBE/NO"""
+    params = _get_params(cfg)
+    noninf = params['noninf_margin']
+    per_unit = params['per_unit_margin']
     
-    mask_A = ~(group_A_data[features].isna().any(axis=1) | group_A_data[target_col].isna())
-    X_A = group_A_data.loc[mask_A, features]
-    y_A = group_A_data.loc[mask_A, target_col]
+    point_ok = (res['change'] <= noninf and 
+                np.all(res['unit_change'] <= per_unit))
+    ci_ok = (res['upper'] <= noninf and 
+            np.all(res['unit_upper'] <= per_unit))
     
-    mask_B = ~(group_B_data[features].isna().any(axis=1) | group_B_data[target_col].isna())
-    X_B = group_B_data.loc[mask_B, features]
-    y_B = group_B_data.loc[mask_B, target_col]
+    w = int(np.argmax(res['unit_upper']))
+    base_msg = (f"汇总 {res['change']*100:+.2f}% "
+               f"(上界{res['upper']*100:+.2f}%)；"
+               f"最差单位 {unit_names[w]} "
+               f"{res['unit_change'][w]*100:+.2f}% "
+               f"(上界{res['unit_upper'][w]*100:+.2f}%)")
     
-    if len(X_A) < MIN_SAMPLE_SIZE or len(X_B) < MIN_SAMPLE_SIZE:
-        return {
-            'rmse_separate': np.inf,
-            'rmse_merged': np.inf,
-            'performance_change_pct': np.nan,
-            'has_performance_gain': False
-        }
+    if point_ok and ci_ok:
+        return 'YES', f"{base_msg} ✓"
+    if point_ok:
+        return 'MAYBE', f"{base_msg} (证据不足)"
     
-    # 分开训练
-    model_A = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_A.fit(X_A, y_A)
-    rmse_A = np.sqrt(mean_squared_error(y_A, model_A.predict(X_A)))
-    
-    model_B = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_B.fit(X_B, y_B)
-    rmse_B = np.sqrt(mean_squared_error(y_B, model_B.predict(X_B)))
-    
-    rmse_separate = (rmse_A + rmse_B) / 2
-    
-    # 合并训练
-    combined_data = pd.concat([group_A_data, group_B_data], ignore_index=True)
-    mask_AB = ~(combined_data[features].isna().any(axis=1) | combined_data[target_col].isna())
-    X_AB = combined_data.loc[mask_AB, features]
-    y_AB = combined_data.loc[mask_AB, target_col]
-    
-    model_AB = HistGradientBoostingRegressor(
-        max_iter=aligned_iter, learning_rate=0.05, max_depth=3, random_state=42
-    )
-    model_AB.fit(X_AB, y_AB)
-    rmse_AB = np.sqrt(mean_squared_error(y_AB, model_AB.predict(X_AB)))
-    
-    # 改为"变化百分比"而非"损失"（支持正负）
-    performance_change = (rmse_AB - rmse_separate) / rmse_separate if rmse_separate > 0 else np.nan
-    has_performance_gain = performance_change < -PERF_GAIN_THRESHOLD  # 提升 > 3%
-    
+    why = []
+    if res['change'] > noninf:
+        why.append(f"汇总超{noninf*100:.0f}%")
+    if np.any(res['unit_change'] > per_unit):
+        why.append(f"有单位超{per_unit*100:.0f}%")
+    return 'NO', f"{base_msg} ({'; '.join(why)})"
+
+
+def summarize(res: dict, unit_names: List[str]) -> dict:
+    """转成 JSON 可序列化格式"""
     return {
-        'rmse_A': float(rmse_A),
-        'rmse_B': float(rmse_B),
-        'rmse_separate': float(rmse_separate),
-        'rmse_merged': float(rmse_AB),
-        'performance_change_pct': float(performance_change * 100) if not np.isnan(performance_change) else np.nan,
-        'has_performance_gain': has_performance_gain,
-        'aligned_iter': int(aligned_iter)
+        'rmse_base': float(res['rmse_base']),
+        'rmse_cand': float(res['rmse_cand']),
+        'change_pct': float(res['change'] * 100),
+        'upper_pct': float(res['upper'] * 100),
+        'units': [{
+            'name': unit_names[u],
+            'n': int(res['n_u'][u]),
+            'rmse_base': float(res['unit_rmse_base'][u]),
+            'rmse_cand': float(res['unit_rmse_cand'][u]),
+            'change_pct': float(res['unit_change'][u] * 100),
+            'upper_pct': float(res['unit_upper'][u] * 100),
+        } for u in range(len(unit_names))],
     }
 
 
-def decide_merge_v3(chow_result: dict, perf_result: dict, spec_distance: float) -> Tuple[str, str]:
-    """
-    v3 改进的合并决策逻辑（OR 逻辑）
+def check_sample_imbalance(n_A: int, n_B: int, cfg) -> Tuple[bool, float, str]:
+    """检查样本比例不平衡"""
+    params = _get_params(cfg)
+    ratio_limit = params['sample_imbalance_ratio']
     
-    返回: (决策, 理由)
-    """
-    chow_pval = chow_result.get('p_value', np.nan)
-    chow_threshold = chow_result.get('chow_threshold', 0.05)
-    chow_passed = chow_pval > chow_threshold
+    ratio = max(n_A, n_B) / min(n_A, n_B) if min(n_A, n_B) > 0 else float('inf')
+    imbalanced = ratio > ratio_limit
+    msg = f"样本比 {ratio:.1f}:1" + ("（不平衡）" if imbalanced else "")
     
-    perf_change = perf_result.get('performance_change_pct', np.nan)
-    has_gain = perf_result.get('has_performance_gain', False)
-    
-    is_imbalanced = chow_result.get('is_sample_imbalanced', False)
-    ratio = chow_result.get('sample_ratio', 1.0)
-    
-    # 【新增】硬性规格距离约束
-    if spec_distance > SPEC_DISTANCE_HARD_LIMIT:
-        return 'NO', f"规格距离 {spec_distance:.3f} > {SPEC_DISTANCE_HARD_LIMIT}（硬性限制）"
-    
-    # 【改进】OR 逻辑
-    if chow_passed:
-        reason = f"Chow p={chow_pval:.4f} > {chow_threshold:.4f} ✓"
-    elif has_gain:
-        reason = f"性能提升 {abs(perf_change):.2f}% > {PERF_GAIN_THRESHOLD*100}% ✓"
-    else:
-        reason = f"Chow p={chow_pval:.4f} ≤ {chow_threshold:.4f} ✗ | 性能变化 {perf_change:.2f}%"
-        if not chow_passed and perf_change is not None and perf_change > PERF_LOSS_THRESHOLD:
-            reason += " ✗（性能恶化）"
-        return 'NO', reason
-    
-    # 警告：样本不平衡
-    if is_imbalanced:
-        reason += f" | ⚠️ 样本比 {ratio:.1f}:1，可信度降低"
-    
-    return 'YES', reason
+    return imbalanced, ratio, msg
 
 
-def main():
-    """主流程 - v3"""
-    print("\n" + "="*80)
-    print("【阶段 B v3：改进决策逻辑和样本量处理】")
-    print("="*80)
-    print("\n【v3 改进】：")
-    print("  ✓ 决策 OR 逻辑：Chow 通过 OR 性能提升")
-    print("  ✓ 样本不平衡检查：ratio > 5:1 时标记")
-    print("  ✓ 规格距离硬性约束：> 1.0 g/m² 直接排除")
-    print("  ✓ 性能提升支持：-3% 改进时允许合并")
+# ============================================================
+# 阶段 B 主函数
+# ============================================================
+
+def main(strategy, cfg, result_dir: str) -> bool:
+    """
+    阶段 B 主函数 - 完整交叉验证与非劣效判定
     
-    config_path = "config.yaml"
-    candidates_csv = "result/spec_group_merge_analysis/merge_candidates.csv"
+    Args:
+        strategy: GroupingStrategy
+        cfg: ConfigManager
+        result_dir: 结果目录
+    
+    Returns:
+        bool: 是否成功
+    """
+    logger.info("\n" + "=" * 70)
+    logger.info("【阶段 B：交叉验证与非劣效判定】")
+    logger.info("=" * 70)
     
     try:
+        # 加载阶段 A 的结果
+        candidates_file = os.path.join(result_dir, 'merge_candidates.csv')
+        units_file = os.path.join(result_dir, 'level_composition.csv')
+        
+        if not os.path.exists(candidates_file):
+            logger.error(f"阶段 A 输出不存在: {candidates_file}")
+            return False
+        
+        try:
+            candidates = pd.read_csv(candidates_file)
+        except pd.errors.EmptyDataError:
+            logger.warning(f"未发现候选对，跳过阶段 B")
+            return True
+        
+        units = pd.read_csv(units_file) if os.path.exists(units_file) else None
+        
+        logger.info(f"加载候选对: {len(candidates)}")
+        
+        # 检查策略类型
+        strategy_type = strategy.get_strategy_type()
+        
+        # 规格组笛卡尔积策略暂不支持（候选对无法按单一表面分组）
+        if strategy_type == 'spec_group_cartesian':
+            logger.warning(f"规格组笛卡尔积策略暂不支持阶段 B 检验（需要重新设计分组逻辑）")
+            logger.warning(f"  建议使用表面设定值档策略进行交叉验证")
+            return True
+        
         # 加载数据
-        df_cand = load_merge_candidates(candidates_csv)
-        df = load_featured_data(config_path)
-        df = build_spec_groups(df)
+        input_file = cfg.get_input_file()
+        df = pd.read_excel(input_file)
+        logger.info(f"加载数据: {len(df)} 行")
         
-        features_dict = {
-            'Top': get_feature_cols('Top'),
-            'Bot': get_feature_cols('Bot')
-        }
+        # 获取特征列和目标列
+        feats = get_feature_cols(cfg)
+        delta_cols = cfg.get_delta_columns()
+        setpoint_cols = cfg.get_setpoint_columns()
         
-        # 构建缓存
-        print("\n[缓存构建] 预计算最优迭代次数...")
-        cache = {}
-        for group_label in sorted(df['Setpoint_Group_Label'].unique()):
-            group_data = df[df['Setpoint_Group_Label'] == group_label]
-            surface = 'Top' if 'Top_Delta' in df.columns and group_data['Top_Delta'].notna().sum() > 0 else 'Bot'
-            features = features_dict.get(surface, [])
-            target_col = f'{surface}_Delta'
+        if not feats:
+            logger.warning("未配置特征列，阶段 B 跳过")
+            return True
+        
+        # 针对每个表面分别进行验证
+        all_results = []
+        
+        for surface in ['Top', 'Bot']:
+            target = delta_cols.get(surface, f'{surface}_Delta')
+            own_setpoint = setpoint_cols.get(surface)
+            oth_setpoint = setpoint_cols.get('Bot' if surface == 'Top' else 'Top')
             
-            X = group_data[features].dropna()
-            y = group_data[target_col].dropna()
-            if len(X) >= 20:
-                cache[group_label] = find_optimal_iterations(X[features], y)
-            else:
-                cache[group_label] = 50
-        
-        print(f"✓ 缓存完成: {len(cache)} 个规格组")
-        
-        # 执行验证
-        print("\n" + "="*80)
-        print("【执行 Chow 检验】")
-        print("="*80)
-        
-        results = []
-        merged_count = 0
-        imbalanced_count = 0
-        
-        for idx, cand in df_cand.iterrows():
-            group_A = cand['group_A']
-            group_B = cand['group_B']
-            surface = cand['surface']
-            spec_distance = cand.get('spec_distance', 2.0)
-            
-            # 【新增】硬性规格距离约束
-            if spec_distance > SPEC_DISTANCE_HARD_LIMIT:
-                results.append({
-                    'group_A': group_A,
-                    'group_B': group_B,
-                    'surface': surface,
-                    'spec_distance': spec_distance,
-                    'final_decision': 'NO',
-                    'reason': f"规格距离 {spec_distance:.3f} > {SPEC_DISTANCE_HARD_LIMIT}",
-                    'validation_method': 'hard_limit',
-                    'skip_reason': 'spec_distance_exceeded'
-                })
+            if target not in df.columns:
+                logger.debug(f"表面 {surface} 目标列不存在，跳过")
                 continue
             
-            group_A_data = df[df['Setpoint_Group_Label'] == group_A].copy()
-            group_B_data = df[df['Setpoint_Group_Label'] == group_B].copy()
-            features = features_dict.get(surface, [])
-            target_col = f'{surface}_Delta'
+            # 过滤数据
+            need_cols = feats + [target, own_setpoint, oth_setpoint]
+            missing = [c for c in need_cols if c not in df.columns]
+            if missing:
+                logger.debug(f"表面 {surface} 缺少列: {missing}")
+                continue
             
-            opt_iter_A = cache.get(group_A, 50)
-            opt_iter_B = cache.get(group_B, 50)
-            aligned_iter = min(opt_iter_A, opt_iter_B)
+            d = df[need_cols].dropna().copy()
+            if len(d) < _get_params(cfg)['min_pair_samples']:
+                logger.debug(f"表面 {surface} 样本量不足")
+                continue
             
-            # Chow 检验
-            chow_result = chow_test_with_aligned_iter_v3(
-                group_A_data, group_B_data, surface, features, target_col, aligned_iter, spec_distance
-            )
+            X = d[feats].values
+            y = d[target].values
+            g = pd.factorize(d[own_setpoint])[0]  # 按设定值分组
+            setpoint_values = d[own_setpoint].values
             
-            # 性能对比
-            perf_result = performance_comparison_v3(
-                group_A_data, group_B_data, surface, features, target_col, aligned_iter
-            )
+            logger.info(f"\n【表面 {surface}】")
+            logger.info(f"  样本数: {len(d)}，特征数: {len(feats)}，单位数: {int(g.max())+1}")
             
-            # 决策
-            decision, reason = decide_merge_v3(chow_result, perf_result, spec_distance)
+            # 为各单位选择最优迭代次数
+            params = _get_params(cfg)
+            iters_sep = []
+            for u in range(int(g.max()) + 1):
+                try:
+                    X_u = X[g == u]
+                    y_u = y[g == u]
+                    if len(X_u) >= params['min_pair_samples']:
+                        it = find_optimal_iterations(X_u, y_u, cfg)
+                    else:
+                        it = params['iter_grid'][len(params['iter_grid'])//2]
+                    iters_sep.append(it)
+                except Exception as e:
+                    logger.debug(f"单位 {u} 迭代选择失败: {e}")
+                    iters_sep.append(params['iter_grid'][len(params['iter_grid'])//2])
             
-            result = {
-                'group_A': group_A,
-                'group_B': group_B,
-                'surface': surface,
-                'spec_distance': spec_distance,
-                'final_decision': decision,
-                'reason': reason,
-                'chow_test': chow_result,
-                'performance': perf_result,
-                'validation_method': 'chow_test_v3'
-            }
-            results.append(result)
+            # 选择全局最优迭代次数
+            try:
+                iter_pool = find_optimal_iterations(X, y, cfg)
+            except Exception as e:
+                logger.debug(f"全局迭代选择失败: {e}")
+                iter_pool = params['iter_grid'][len(params['iter_grid'])//2]
             
-            if decision == 'YES':
-                merged_count += 1
-                if chow_result.get('is_sample_imbalanced'):
-                    imbalanced_count += 1
-        
-        # 输出结果
-        print(f"\n✓ 验证完成: {len(results)} 对")
-        print(f"  · 可合并: {merged_count} 对")
-        print(f"  · 其中样本不平衡: {imbalanced_count} 对")
+            logger.info(f"  单位迭代: {iters_sep}，全局迭代: {iter_pool}")
+            
+            # 交叉验证
+            logger.info(f"  正在进行 {params['cv_splits']} 折 × {params['cv_repeats']} 重 交叉验证...")
+            try:
+                mse_dict, n_splits = cv_strategies(X, y, g, iters_sep, iter_pool, cfg)
+                logger.info(f"  交叉验证完成（实际 {n_splits} 折）")
+                
+                # 对每个候选对进行判定
+                mse_sep = mse_dict['separate']
+                mse_pool = mse_dict['pooled']
+                
+                # 计算表面汇总 RMSE
+                rmse_sep_all = np.sqrt(np.mean(mse_sep))
+                rmse_pool_all = np.sqrt(np.mean(mse_pool))
+                change_pct_all = (rmse_pool_all - rmse_sep_all) / rmse_sep_all * 100 if rmse_sep_all > 0 else 0
+                
+                # 非劣效边界参数（从配置文件读取）
+                # 注意：配置中定义为 non_inferiority.summary_margin 等（带点号）
+                margin_pool = cfg.get_analysis_parameter('non_inferiority.summary_margin', 0.03)  # 默认 3%
+                margin_unit = cfg.get_analysis_parameter('non_inferiority.per_unit_margin', 0.05)  # 默认 5%
+                
+                # 转换为百分比数值
+                margin_pool_pct = margin_pool * 100 if margin_pool < 1 else margin_pool  # 如果 <1 则乘以 100
+                
+                for _, cand in candidates.iterrows():
+                    unit_a = str(cand.get('unit_A', ''))
+                    unit_b = str(cand.get('unit_B', ''))
+                    
+                    # 查找该单位对应的数据
+                    a_mask = (setpoint_values == float(unit_a.split('_')[-1]) if '_' in unit_a else False)
+                    b_mask = (setpoint_values == float(unit_b.split('_')[-1]) if '_' in unit_b else False)
+                    
+                    # 非劣效判定（基于汇总性能与边界对比）
+                    if change_pct_all <= margin_pool_pct:
+                        final_decision = 'YES'
+                        rationale = f'汇总 RMSE 增长 {change_pct_all:.2f}% ≤ {margin_pool_pct:.1f}% 边界'
+                    elif change_pct_all <= (margin_pool_pct + 2):
+                        final_decision = 'MAYBE'
+                        rationale = f'汇总 RMSE 增长 {change_pct_all:.2f}% 接近 {margin_pool_pct:.1f}% 边界'
+                    else:
+                        final_decision = 'NO'
+                        rationale = f'汇总 RMSE 增长 {change_pct_all:.2f}% > {margin_pool_pct:.1f}% 边界'
+                    
+                    result_item = {
+                        'unit_A': unit_a,
+                        'unit_B': unit_b,
+                        'surface': surface,
+                        'final_decision': final_decision,
+                        'cv': {
+                            'rmse_separate': float(rmse_sep_all),
+                            'rmse_pooled': float(rmse_pool_all),
+                            'change_pct': float(change_pct_all),
+                            'n_folds': int(n_splits),
+                        },
+                        'rationale': rationale,
+                    }
+                    all_results.append(result_item)
+                
+                logger.info(f"  已检验 {len(candidates)} 个候选对")
+            
+            except Exception as e:
+                logger.warning(f"表面 {surface} 交叉验证失败: {e}", exc_info=True)
+                continue
         
         # 保存结果
-        os.makedirs("result/spec_group_merge_analysis", exist_ok=True)
-        with open("result/spec_group_merge_analysis/chow_test_results_v3.json", 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+        output_file = os.path.join(result_dir, 'merge_validation_results.json')
+        output_data = {
+            'strategy': strategy.get_strategy_type(),
+            'version': '2.0',
+            'timestamp': pd.Timestamp.now().isoformat(),
+            'candidates': all_results,
+        }
         
-        print(f"✓ 结果保存至: result/spec_group_merge_analysis/chow_test_results_v3.json")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
         
+        logger.info(f"\n✓ 阶段 B 完成")
+        logger.info(f"  检验候选对: {len(all_results)} 对")
+        logger.info(f"  结果已保存: {output_file}")
+        
+        return True
+    
     except Exception as e:
-        print(f"\n✗ 执行出错: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"✗ 阶段 B 执行出错: {e}", exc_info=True)
+        return False
 
 
 if __name__ == '__main__':
-    main()
+    from config_manager import ConfigManager
+    from grouping_strategies import create_strategy
+    
+    cfg = ConfigManager("grouping_config.yaml")
+    strategy_type = cfg.get_strategy_type('surface_setpoint_level')
+    cols = cfg.get_columns_for_strategy('surface_setpoint_level')
+    strategy = create_strategy(strategy_type, cols)
+    result_dir = "result/spec_group_merge_analysis/surface_setpoint_level"
+    
+    main(strategy, cfg, result_dir)

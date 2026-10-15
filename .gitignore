@@ -8,3 +8,7 @@
 *.txt
 *.idea
 *.html
+*.joblib
+*.pkl
+*.bak
+.svn

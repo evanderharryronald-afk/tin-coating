@@ -19,7 +19,7 @@
     "Top2.799_Bot2.799__Top": {
       "damping": 0.3046,
       "pos_boost": 1.6837,
-      "alpha_smoothing": 0.7790,
+      "alpha_smoothing": 0.6,
       "max_iter": 250,
       "learning_rate": 0.0144,
       "max_depth": 5
@@ -27,7 +27,7 @@
     "Top2.799_Bot2.799__Bot": {
       "damping": 0.2848,
       "pos_boost": 1.2582,
-      "alpha_smoothing": 0.7267,
+      "alpha_smoothing": 0.6,
       "max_iter": 300,
       "learning_rate": 0.0117,
       "max_depth": 4

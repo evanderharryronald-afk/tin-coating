@@ -119,6 +119,68 @@ def add_lag_features(train_df, test_df, cols, lag=1):
     return lag_cols
 
 
+def add_delta_lag_features(train_df, test_df, lag_count, surface, lab_delay):
+    """
+    时序安全地添加 Δ = Lab - Online 的滞后特征。
+    
+    关键: 这些 lag 特征在生产中可用（延迟 lab_delay 卷后才能拿到 Lab）。
+    但 Δ_lag{d} 需要当前预测时刻已经拿到 Lab[t-d]，
+    所以 lab_delay 必须 ≤ lag_count（比如 lab_delay=3 时 lag ≥ 3 才在上线时刻可用）。
+    
+    这里构造 lag = 3, 4, 5 (lab_delay=3 时这三个都在生产中可用)，
+    lag=1,2 生产中不可用（t-1 的 Lab 还没回来），不构入。
+    """
+    delta_col = f"Delta_{surface}"
+    lab_col = f"Lab_{surface}"
+    online_col = f"Online_{surface}"
+    
+    # train: Δ 是真实 Lab，shift(lag_count) 得到滞后特征
+    for lag in range(lab_delay, lag_count + 1):
+        shift = train_df[lab_col].shift(lag) - train_df[online_col].shift(lag)
+        train_df[f"{delta_col}_lag{lag}"] = shift.fillna(shift.mean())
+        
+    # test: 从 train 末尾续接（和 add_lag_features 同样逻辑）
+    for lag in range(lab_delay, lag_count + 1):
+        delta_train = train_df[lab_col] - train_df[online_col]
+        tail_vals = delta_train.iloc[-lag:].values
+        test_delta_shifted = (test_df[lab_col].shift(lag) - test_df[online_col].shift(lag))
+        test_delta_shifted.iloc[:lag] = tail_vals[: min(lag, len(test_df))]
+        test_df[f"{delta_col}_lag{lag}"] = test_delta_shifted
+    
+    new_cols = [f"{delta_col}_lag{i}" for i in range(lab_delay, lag_count + 1)]
+    print(f"  新增 Δ 滞后特征 (可用延迟={lab_delay}卷): {new_cols}")
+    return new_cols
+
+
+def rolling_bias_ewma(train_deltas, test_online, test_lab, alpha=0.25, delay=3,
+                       sample_rate=1.0, seed=42):
+    """
+    纯滚动 EWMA bias 修正 (Online + EWMA_bias)，不跑任何模型。
+    
+    先在 train 上用真实 Δ 初始化 bias 状态，再在 test 上生产场景模拟。
+    这是 LightGBM 应该超越的"简单基线"。
+    """
+    rng = np.random.RandomState(seed)
+    
+    # 训练: 预热 bias
+    bias = 0.0
+    for delta in train_deltas:
+        bias = alpha * delta + (1 - alpha) * bias
+    
+    # 测试: 生产场景（延迟 + 抽样）
+    pending = []
+    pred = np.empty(len(test_online))
+    for i in range(len(test_online)):
+        pred[i] = test_online[i] + bias
+        if rng.random() < sample_rate:
+            pending.append((i, test_lab[i] - test_online[i]))  # 真实 Δ
+        while pending and pending[0][0] <= i - delay:
+            j, delta_j = pending.pop(0)
+            bias = alpha * delta_j + (1 - alpha) * bias
+    
+    return pred
+
+
 # ===================== EWMA 生产场景模拟 =====================
 def ewma_production(pred_lab, lab_true, alpha, sample_rate, lab_delay, seed=42):
     """
@@ -551,6 +613,19 @@ def run_single_fold(g_train, g_test, fold_id, fold_total, do_diag=False):
         print_metrics(m0, f"F{fold_id} {surface} | baseline | Online_raw")
         fold_results.append({"fold": fold_id, "surface": surface, "model": "Online_raw", **m0})
 
+        # 模型 0b: Rolling_bias_ewma —— 纯 Online + 滚动 EWMA bias 修正（不跑任何模型）
+        # 延迟=3卷, 抽样率=50%, α=0.15 (EWMA 生产场景验证过的稳健配置)
+        # 生产中完全可实现: 延迟3卷拿到 Lab 后更新 bias
+        pred_rb = rolling_bias_ewma(
+            g_train[delta_col].values, online_te, yte,
+            alpha=0.15, delay=3, sample_rate=0.50,
+            seed=42 + fold_id,  # 不同折用不同抽样 seed
+        )
+        m0b = evaluate(yte, pred_rb, online=online_te)
+        print_metrics(m0b, f"F{fold_id} {surface} | baseline | Rolling_bias_ewma (α=0.15, d=3, r=50%)")
+        fold_results.append({"fold": fold_id, "surface": surface,
+                             "model": "Rolling_bias_ewma", **m0b})
+
         # 模型 1: Bias 零模型
         tail_n = min(300, len(g_train))
         bias_train_tail = g_train[delta_col].iloc[-tail_n:].mean()
@@ -763,8 +838,10 @@ def main():
             header += f" {m:>9s}"
         print(header)
         print("  " + "-" * (20 + 10 * len(metrics_cols)))
-        for model in ["Online_raw", "Bias_shifted(N=300)", "LGBM_lag_only", "LGBM_ewma_only",
-                      "LGBM_full_lag", "sklearn_HGB_full_lag", "LGBM_full_ewma", "LGBM_full_comb"]:
+        for model in ["Online_raw", "Rolling_bias_ewma", "Bias_shifted(N=300)",
+                      "LGBM_lag_only", "LGBM_ewma_only",
+                      "LGBM_full_lag", "sklearn_HGB_full_lag",
+                      "LGBM_full_ewma", "LGBM_full_comb"]:
             if model not in cv_mean.index.get_level_values("model"):
                 continue
             row = cv_mean.loc[(surface, model)]

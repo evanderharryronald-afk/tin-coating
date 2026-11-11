@@ -474,16 +474,16 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
     df[f'{prefix}_Current_Per_Speed'] = df[current_col] / (df[speed_col] + 1e-5)
     df[f'{prefix}_Weight_Deviation'] = df[setpoint_weight] - df[online_col]
 
-    # 与 get_feature_cols 保持完全一致（当前训练未使用 Weight_Deviation）
+    # 与 get_feature_cols 保持完全一致（最终 8 特征组合，ablation 验证全面优于 baseline_5）
     feature_cols = [
         online_col,
         current_col,
-        # f'{prefix}_Current_Per_Speed',
-        # f'{prefix}_Theoretical_Factor',
+        f'{prefix}_Current_Per_Speed',
+        f'{prefix}_Theoretical_Factor',
         speed_col,
         'Dimension_[mm]_Width',
         'Dimension_[mm]_Thickness',
-        # 'Steel_Grade_Encoded'
+        'Steel_Grade_Encoded'
     ]
 
     X = df[feature_cols]
@@ -924,17 +924,17 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
 
 
 def get_feature_cols(surface: str) -> list:
-    """与 fit_and_evaluate_surface 中 feature_cols 完全一致"""
+    """与 fit_and_evaluate_surface 中 feature_cols 完全一致（最终 +all_8 组合）"""
     prefix = "Top" if surface == "Top" else "Bot"
     return [
         f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg",
         f"{prefix}_Current_Sum",
-        # f"{prefix}_Current_Per_Speed",  # 已移除（特征剪枝）
-        # f"{prefix}_Theoretical_Factor",  # 已移除（特征剪枝）
+        f"{prefix}_Current_Per_Speed",
+        f"{prefix}_Theoretical_Factor",
         "Speed[m/min]_Process_Avg",
         "Dimension_[mm]_Width",
         "Dimension_[mm]_Thickness",
-        # "Steel_Grade_Encoded"  # 已移除（特征剪枝）
+        "Steel_Grade_Encoded"
     ]
 
 

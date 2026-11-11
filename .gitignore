@@ -12,3 +12,4 @@
 *.pkl
 *.bak
 .svn
+*.log

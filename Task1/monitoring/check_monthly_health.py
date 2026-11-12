@@ -38,17 +38,18 @@ if str(TASK1_ROOT) not in sys.path:
 
 # 复用生产链路里的现成逻辑
 from model_persistence import load_model  # noqa: E402
+from tin_coating.config import load_config  # noqa: E402
+
+_CFG = load_config()
 
 
-GROUP_LABEL = "Top2.799_Bot2.799"
+def _default_jobs_dir(group: str) -> Path:
+    return _CFG.resolve("paths.trained_models") / group
+
+
 TOP_SP = 2.799
 BOT_SP = 2.799
 
-JOBS_DIR = TASK1_ROOT / "result/trained_models/by_group" / GROUP_LABEL
-DEFAULT_FEATURED = TASK1_ROOT / "result/data/feature_engineered_data/featured_data.xlsx"
-
-# 异常阈值
-REGRESSION_Z_THRESHOLD = -2.0      # z-score 低于此值判定退化
 MIN_SEGMENT_SAMPLES = 30           # 单个时间段少于 30 条不单独判断
 
 
@@ -69,11 +70,10 @@ def _try_load_model(surface: str, group_label: str, train_df: pd.DataFrame | Non
 
     线上超参来源：group_params_2_799_only.json（alpha_smoothing + HGB 超参）。
     """
-    import coating_model_by_group as cm
-    import __main__
-    __main__.ResidualCorrectionModel = cm.ResidualCorrectionModel
+    import coating_model_by_group as cm  # noqa: F401  # 确保类能从任何路径被 joblib 反序列化
+    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
 
-    primary = JOBS_DIR / f"{surface}_model.joblib"
+    primary = _default_jobs_dir(group_label) / f"{surface}_model.joblib"
     if primary.exists():
         try:
             import joblib
@@ -153,11 +153,12 @@ def _metrics(actual: np.ndarray, pred: np.ndarray) -> dict:
     }
 
 
-def run(featured_path: str | Path, group_label: str = GROUP_LABEL,
+def run(featured_path: str | Path | None = None, group_label: str | None = None,
         window_days: int | None = None,
         report_dir: str | None = None,
         silent: bool = False) -> dict:
-    featured_path = Path(featured_path)
+    featured_path = Path(featured_path) if featured_path else _CFG.resolve("paths.feature_data")
+    group_label = group_label or _CFG.app.default_group
     if not featured_path.exists():
         raise FileNotFoundError(f"featured_data 不存在: {featured_path}")
 
@@ -298,20 +299,27 @@ def run(featured_path: str | Path, group_label: str = GROUP_LABEL,
             seg_metrics.append(row)
 
         # 异常判断：对"最近"段 vs "历史"段做 z-score
+        # 注意 rmse_improve_pct = (model - online) / online，越负越好。
+        # 所以"退化"= 最近段的提升幅度比历史段更小（数值更大），即 z 为正且足够大。
         verdict = "OK"
         if len(seg_metrics) >= 2:
             # 最后一段当作"最近"，其余当"历史"
             recent = seg_metrics[-1]
             historical = seg_metrics[:-1]
-            hist_mean = np.mean([h["rmse_improve_pct"] for h in historical])
-            hist_std = max(np.std([h["rmse_improve_pct"] for h in historical]), 1e-6)
+            hist_vals = [h["rmse_improve_pct"] for h in historical]
+            hist_mean = float(np.mean(hist_vals))
+            hist_std = max(float(np.std(hist_vals)), 1e-6)
             z = (recent["rmse_improve_pct"] - hist_mean) / hist_std
+            drop = recent["rmse_improve_pct"] - hist_mean     # 正数 = 提升幅度变小 = 变差
             recent["_z_score"] = float(z)
-            if z < REGRESSION_Z_THRESHOLD:
+            recent["_improve_drop"] = float(drop)
+            z_thr = _CFG.monitoring.regression_z_threshold
+            drop_thr = _CFG.monitoring.regression_min_drop
+            if z > z_thr and drop > drop_thr:
                 verdict = "REGRESSION"
                 summary["warnings"].append(
-                    f"{surface} 最近段 {recent['segment']} RMSE 提升幅度 z-score={z:.2f}，"
-                    f"低于阈值 {REGRESSION_Z_THRESHOLD}，疑似退化")
+                    f"{surface} 最近段 {recent['segment']} RMSE 提升幅度 {recent['rmse_improve_pct']:+.2%}，"
+                    f"历史均值 {hist_mean:+.2%}，退化 {drop:+.2%}（z={z:.2f}），疑似退化")
                 summary["overall_verdict"] = "REGRESSION"
 
         summary["surfaces"][surface] = {
@@ -336,8 +344,9 @@ def run(featured_path: str | Path, group_label: str = GROUP_LABEL,
                 continue
             v = info.get("verdict", "?")
             mark = {"OK": "✅", "WARN": "⚠️", "REGRESSION": "❌"}.get(v, "?")
+            print(f"  {mark} {surface}  verdict={v}")
             for seg in info["segments"]:
-                print(f"  {mark} {surface} [{seg['segment']:>10s}] "
+                print(f"      [{seg['segment']:>10s}] "
                       f"n={seg['n']:4d}  "
                       f"Online RMSE={seg['online_rmse']:.4f} → Model RMSE={seg['model_rmse']:.4f}  "
                       f"(RMSE 提升 {seg['rmse_improve_pct']:+.2%})")
@@ -347,8 +356,8 @@ def run(featured_path: str | Path, group_label: str = GROUP_LABEL,
 
 def main():
     parser = argparse.ArgumentParser(description="月度模型健康度检查（只读）")
-    parser.add_argument("--data", type=str, default=str(DEFAULT_FEATURED))
-    parser.add_argument("--group", type=str, default=GROUP_LABEL)
+    parser.add_argument("--data", type=str, default=str(_CFG.resolve("paths.feature_data")))
+    parser.add_argument("--group", type=str, default=_CFG.app.default_group)
     parser.add_argument("--window", type=int, default=None,
                         help="只看最近 N 天（需要日期列）；默认按月份切分")
     parser.add_argument("--report-dir", type=str, default=None)

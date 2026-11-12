@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    image: tin-coating:latest
+    container_name: tin-coating-dev
+    volumes:
+      - ./result:/app/Task1/result                    # 训练产物/推理输出持久化
+      - ./monitoring/reports:/app/Task1/monitoring/reports  # 监控报告持久化
+      - ./configs:/app/Task1/configs                  # 配置热更新
+    environment:
+      - TIN_COATING_ROOT=/app/Task1
+      - TIN_COATING_ENV=dev
+    working_dir: /app/Task1
+    stdin_open: true
+    tty: true
+    # 常用命令示例（按需替换 CMD）:
+    # docker compose run --rm app python cli/main.py cv --surface Top
+    # docker compose run --rm app python cli/main.py predict \
+    #     --input result/data/feature_engineered_data/featured_data.xlsx \
+    #     --output result/predictions/check.xlsx
+    # docker compose run --rm app pytest tests/test_smoke.py -v

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# 产物目录（运行时生成，不打镜像）
+result/
+monitoring/reports/
+
+# 环境文件
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 旧研究目录（体积大且不会在容器里用到）
+largest_group_repro/
+surface_independent_modeling/
+spec_merge_analyzer/
+ablation/

@@ -40,17 +40,19 @@ if str(TASK1_ROOT) not in sys.path:
 
 from registry import ModelRegistry  # noqa: E402
 import check_data_quality as dq    # noqa: E402
+from tin_coating.config import load_config  # noqa: E402
 
 import coating_model_by_group as cm  # noqa: E402
 
+_CFG = load_config()
 
-GROUP_LABEL = "Top2.799_Bot2.799"
+GROUP_LABEL = _CFG.app.default_group
 TOP_SP = 2.799
 BOT_SP = 2.799
 
-DEFAULT_FEATURED = TASK1_ROOT / "result/data/feature_engineered_data/featured_data.xlsx"
-GROUP_PARAMS_PATH = TASK1_ROOT / "group_params_2_799_only.json"
-REPORTS_DIR = HERE / "reports"
+DEFAULT_FEATURED = _CFG.resolve("paths.feature_data")
+GROUP_PARAMS_PATH = _CFG.resolve("paths.prod_config")
+REPORTS_DIR = _CFG.resolve("paths.reports_dir")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -80,70 +82,32 @@ def _filter_group(df: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
+def _jsonable(obj):
+    """把 numpy 标量/数组递归转成原生 Python 类型，避免 json.dump 报错。"""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 def _walk_forward_cv_summary(df: pd.DataFrame, surface: str, params: dict) -> dict:
-    """5-fold Walk-Forward CV，返回 RMSE/MAE 均值±std。
+    """Walk-Forward CV — 复用子包 tin_coating.modeling.walk_forward_cv 的正式实现。
 
-    每个 fold: train = [0, p%]  → test = [p%, p+5%)，p=70/75/80/85。
-    复用 fit_and_evaluate_surface 里的特征构造 + ResidualCorrectionModel 训练逻辑。
+    历史上有过一份本地拷贝，但 Lab 真值列名写成了英文（实际是"上/下表面…"），
+    导致 CV 永远 KeyError。统一走子包实现，避免两份代码漂移。
     """
-    from sklearn.metrics import mean_squared_error
+    from tin_coating.modeling.walk_forward_cv import run_cv_for_surface
 
-    n = len(df)
-    prefix = surface
-    speed_col = "Speed[m/min]_Process_Avg"
-    online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg"
-    current_col = f"{prefix}_Current_Sum"
-    y_true_col = f"{surface}表面镀层重量A(XA1_0)"
-    if y_true_col not in df.columns:
-        y_true_col = f"{surface}表面镀层重量B(XA1_1)"
-
-    folds = [(0.70, 0.75), (0.75, 0.80), (0.80, 0.85), (0.85, 0.90), (0.90, 1.00)]
-    rmses, maes = [], []
-
-    for train_end_pct, test_end_pct in folds:
-        train_end = int(n * train_end_pct)
-        test_start = int(n * test_end_pct)
-        test_end = int(n * (test_end_pct + 0.05))
-        test_end = min(test_end, n)
-        if test_start >= test_end:
-            continue
-
-        train_df = df.iloc[:train_end].copy()
-        test_df = df.iloc[test_start:test_end].copy()
-
-        train_df[f"{prefix}_Current_Per_Speed"] = train_df[current_col] / (train_df[speed_col] + 1e-5)
-        test_df[f"{prefix}_Current_Per_Speed"] = test_df[current_col] / (test_df[speed_col] + 1e-5)
-
-        feature_cols = [
-            online_col, current_col,
-            f"{prefix}_Current_Per_Speed",
-            f"{prefix}_Theoretical_Factor",
-            speed_col,
-            "Dimension_[mm]_Width",
-            "Dimension_[mm]_Thickness",
-            "Steel_Grade_Encoded",
-        ]
-        X_train = train_df[feature_cols]
-        y_delta_train = train_df[f"{prefix}_Delta"]
-        X_test = test_df[feature_cols]
-        actual_test = test_df[online_col]
-        y_true_test = test_df[y_true_col]
-
-        corrector = cm._build_corrector_instance(params, cm.ResidualCorrectionModel)
-        corrector.fit(X_train, y_delta_train)
-        pred_final, _ = corrector.predict_smooth(X_test, actual_test)
-
-        residual = y_true_test.values - pred_final.values
-        rmses.append(np.sqrt(np.mean(residual ** 2)))
-        maes.append(np.mean(np.abs(residual)))
-
-    return {
-        "cv_rmse_mean": float(np.mean(rmses)) if rmses else None,
-        "cv_rmse_std": float(np.std(rmses)) if rmses else None,
-        "cv_mae_mean": float(np.mean(maes)) if maes else None,
-        "cv_mae_std": float(np.std(maes)) if maes else None,
-        "n_folds": len(rmses),
-    }
+    return run_cv_for_surface(df, surface, params)
 
 
 def run(featured_path: str | Path,
@@ -189,8 +153,7 @@ def run(featured_path: str | Path,
     # 2. 按 surface 各自重训
     # --------------------------------------------------------------
     import joblib
-    import __main__
-    __main__.ResidualCorrectionModel = cm.ResidualCorrectionModel  # pickle 兼容
+    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401  # pickle 兼容
 
     for surface in surfaces:
         params = params_map[surface]
@@ -221,9 +184,9 @@ def run(featured_path: str | Path,
             print(f"  ❌ {surface} hold-out 失败: {e}")
             continue
 
-        ho_test_rmse = holdout_metrics.get("RMSE_测试",
-                                           holdout_metrics.get(f"RMSE_测试_模型", None))
-        ho_train_rmse = holdout_metrics.get("RMSE_训练")
+        # group_train.fit_and_evaluate_surface 返回的 key 是 'RMSE_模型_测试' / 'RMSE_模型_训练'
+        ho_test_rmse = holdout_metrics.get("RMSE_模型_测试")
+        ho_train_rmse = holdout_metrics.get("RMSE_模型_训练")
 
         # 2b. Walk-Forward CV
         try:
@@ -294,7 +257,7 @@ def run(featured_path: str | Path,
     json_path = REPORTS_DIR / f"retrain_report_{stamp}.json"
     txt_path = REPORTS_DIR / f"retrain_report_{stamp}.txt"
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+        json.dump(_jsonable(report), f, ensure_ascii=False, indent=2)
 
     # 简明 txt
     lines = [f"# Auto-Retrain Report  {stamp}",
@@ -305,15 +268,18 @@ def run(featured_path: str | Path,
         comp = info.get("comparison_vs_active", {})
         lines.append(f"## {surface}")
         lines.append(f"  hold-out 测试 RMSE: {info.get('holdout_test_rmse')}")
-        if "cv_rmse_mean" in cv:
+        if cv.get("cv_rmse_mean") is not None:
             lines.append(f"  Walk-Forward CV RMSE: {cv['cv_rmse_mean']:.4f} ± {cv['cv_rmse_std']:.4f}  "
                          f"(n_folds={cv['n_folds']})")
+        elif cv.get("error"):
+            lines.append(f"  Walk-Forward CV: 失败 — {cv['error']}")
         if comp:
             for key, v in comp.items():
                 lines.append(f"  vs active ({key}): {v['old']} → {v['new']} "
                              f"({v['pct']:+.2%}, improved={v['improved']})")
         lines.append(f"  pending 模型: {info['path']}")
-        lines.append(f"  审批: python monitoring/gate.py --approve {surface} --version {stamp}")
+        lines.append(f"  审批: python monitoring/gate.py --group {GROUP_LABEL} --surface {surface} "
+                     f"--approve --version {stamp} --reason \"...\" --yes")
         lines.append("")
     if report.get("skipped"):
         lines.append("## Skipped")

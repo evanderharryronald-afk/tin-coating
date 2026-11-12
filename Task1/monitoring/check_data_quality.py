@@ -27,17 +27,13 @@ if str(TASK1_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# 阈值（这里写死在脚本里，便于随脚本版本追踪；未来复杂了再挪到 config）
+# 阈值统一走 configs/app.yaml 的 monitoring.* 段
 # ---------------------------------------------------------------------------
-GROUP_LABEL = "Top2.799_Bot2.799"
+from tin_coating.config import load_config  # noqa: E402
+_CFG = load_config()
+
 TOP_SP = 2.799
 BOT_SP = 2.799
-
-# 异常判断阈值
-MAX_MISSING_RATIO = 0.05          # 关键字段缺失率 > 5% 报警
-MAX_DELTA_OUTLIER_RATIO = 0.02    # |Δ| > 0.5 的样本占比 > 2% 报警
-MIN_GROUP_SAMPLES = 200           # 样本少于 200 不建模
-RECENT_WINDOW_DAYS = 30           # "近 N 天"用来判断是否有新数据进
 
 # 需要完整的字段
 REQUIRED_COLUMNS = [
@@ -87,7 +83,7 @@ def run(data_path: str | Path, report_dir: str | None = None, silent: bool = Fal
         "run_at": datetime.now().isoformat(timespec="seconds"),
         "data_path": str(data_path),
         "total_rows_in_file": int(len(df_all)),
-        "group_label": GROUP_LABEL,
+        "group_label": _CFG.app.default_group,
         "group_rows": int(len(df_group)),
         "checks": {},
         "pass": True,
@@ -114,25 +110,25 @@ def run(data_path: str | Path, report_dir: str | None = None, silent: bool = Fal
     # --------------------------------------------------------------
     # 检查 2：规格组样本数是否足够
     # --------------------------------------------------------------
-    if len(df_group) < MIN_GROUP_SAMPLES:
+    if len(df_group) < _CFG.model.min_group_samples:
         _fail("group_sample_count",
-              f"样本 {len(df_group)} < 阈值 {MIN_GROUP_SAMPLES}")
+              f"样本 {len(df_group)} < 阈值 {_CFG.model.min_group_samples}")
     else:
         _ok("group_sample_count",
-            f"样本 {len(df_group)} ≥ 阈值 {MIN_GROUP_SAMPLES}")
+            f"样本 {len(df_group)} ≥ 阈值 {_CFG.model.min_group_samples}")
 
     # --------------------------------------------------------------
     # 检查 3：关键字段缺失率
     # --------------------------------------------------------------
     numeric_check_cols = [c for c in REQUIRED_COLUMNS if c in df_group.columns]
     missing_ratio = df_group[numeric_check_cols].isna().mean().mean() if numeric_check_cols else 1.0
-    if missing_ratio > MAX_MISSING_RATIO:
+    if missing_ratio > _CFG.monitoring.quality_max_missing_ratio:
         _fail("missing_ratio",
-              f"关键字段平均缺失率 {missing_ratio:.2%} > 阈值 {MAX_MISSING_RATIO:.0%}",
+              f"关键字段平均缺失率 {missing_ratio:.2%} > 阈值 {_CFG.monitoring.quality_max_missing_ratio:.0%}",
               extra={"per_col": df_group[numeric_check_cols].isna().mean().to_dict()})
     else:
         _ok("missing_ratio",
-            f"关键字段平均缺失率 {missing_ratio:.2%} ≤ 阈值 {MAX_MISSING_RATIO:.0%}",
+            f"关键字段平均缺失率 {missing_ratio:.2%} ≤ 阈值 {_CFG.monitoring.quality_max_missing_ratio:.0%}",
             extra={"per_col": df_group[numeric_check_cols].isna().mean().to_dict()})
 
     # --------------------------------------------------------------
@@ -144,9 +140,9 @@ def run(data_path: str | Path, report_dir: str | None = None, silent: bool = Fal
             series = df_group[col].dropna()
             extreme_ratio = (series.abs() > 0.5).mean()
             name = f"delta_outlier_{prefix}"
-            if extreme_ratio > MAX_DELTA_OUTLIER_RATIO:
+            if extreme_ratio > _CFG.monitoring.quality_delta_outlier_ratio:
                 _fail(name,
-                      f"{prefix} |Δ|>0.5 占比 {extreme_ratio:.2%} > 阈值 {MAX_DELTA_OUTLIER_RATIO:.0%}")
+                      f"{prefix} |Δ|>0.5 占比 {extreme_ratio:.2%} > 阈值 {_CFG.monitoring.quality_delta_outlier_ratio:.0%}")
             else:
                 _ok(name,
                     f"{prefix} |Δ|>0.5 占比 {extreme_ratio:.2%}")

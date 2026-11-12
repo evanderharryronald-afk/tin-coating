@@ -1,0 +1,62 @@
+# 全项目统一配置。优先读 TIN_COATING__<DOTTED_KEY>=<value> 环境变量覆盖。
+# 切 prod: TIN_COATING_ENV=prod python cli/main.py ...
+version: "1.0"
+
+app:
+  default_group: "Top2.799_Bot2.799"       # 规格组名，Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min .round(3) == 2.799
+  default_surface: "Top"                   # 默认 Top / Bot
+
+paths:
+  feature_data: "result/data/feature_engineered_data/featured_data.xlsx"
+  trained_models: "result/trained_models/by_group"
+  online_jobs: "result/trained_models/by_group/${app.default_group}"
+  registry: "monitoring/registry.json"
+  reports_dir: "monitoring/reports"
+  prod_config: "group_params_2_799_only.json"
+  data_cleaned: "result/data/cleaned_data"
+  logs_dir: "monitoring/logs"
+  alerts_file: "monitoring/logs/alerts.jsonl"
+  locks_dir: "monitoring/locks"
+
+model:
+  min_group_samples: 200                   # 规格组样本阈值，低于则跳过
+  min_train_samples: 50                    # 训练集最低条数保护
+  default_train_ratio: 0.65
+  default_val_ratio: 0.20
+  cv_folds: 5                              # Walk-Forward CV folds 数（最后一段太窄会被跳过，实际通常 4）
+  random_state: 42
+  ewma_alpha: 0.6                          # EWMA smoothing α，ResidualCorrectionModel 里写死，改这里要同步改代码
+
+monitoring:
+  # health: 最近段"RMSE 提升幅度"比历史段更差多少才判 REGRESSION
+  # rmse_improve_pct = (model - online)/online，越负越好 → 退化时 z 为正
+  regression_z_threshold: 2.0
+  regression_min_drop: 0.05                # 退化幅度（百分比绝对值）至少 5 个百分点，避免小样本误报
+  quality_max_missing_ratio: 0.05          # 质量门：关键字段平均缺失率上限
+  quality_delta_outlier_ratio: 0.01        # 质量门：|Δ|>0.5 比例上限
+
+environment:
+  dev: {}                                  # dev 直接用上面默认值
+  prod:                                    # prod 覆盖（按需，默认不影响）
+    paths:
+      reports_dir: "/var/log/tin-coating/reports"
+
+# ---------------------------------------------------------------------------
+# 在线服务（7x24）：python cli/main.py serve
+# ---------------------------------------------------------------------------
+service:
+  host: "0.0.0.0"
+  port: 8080
+  max_batch_rows: 5000                     # 单次 /predict 最大行数，超出返回 400
+  max_concurrent_requests: 4               # 并发上限，超出排队
+  request_timeout_seconds: 30
+  api_key_env: "TIN_API_KEY"               # 设置了该环境变量则要求请求头 X-API-Key
+                                           # 模型热加载：每次请求按 registry active 版本 + 文件指纹自动检测，无需配置
+
+# ---------------------------------------------------------------------------
+# 运维任务：python cli/main.py ops run --job quality|health|retrain
+# ---------------------------------------------------------------------------
+ops:
+  lock_timeout_seconds: 5                  # 同一 job 并发时，第二个等待多久后放弃
+  alert_webhook_env: "TIN_ALERT_WEBHOOK"   # 设置后失败告警 POST 到该地址；不设则只落盘
+  keep_logs_days: 30

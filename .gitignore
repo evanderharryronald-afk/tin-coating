@@ -13,3 +13,5 @@
 *.bak
 .svn
 *.log
+*.json
+*.jsonl

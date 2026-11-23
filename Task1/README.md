@@ -1,37 +1,76 @@
 # tin-coating
 
-连续热镀锌线镀层重量（Top / Bot 表面）偏差校正模型。基于 HistGradientBoostingResidualCorrection 的残差校正 + EWMA 平滑，按 `Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min` / `..._BOT_Min` 分组训练，Walk-Forward CV 验证。
+镀锌线 Top / Bot 表面镀层重量偏差校正模型。基于 **HistGradientBoosting + 残差校正 + EWMA 平滑**，按规格组训练，Walk-Forward CV 验证。
 
-当前生产配置（Top2.799_Bot2.799 规格组）：
-- Top HGB: damping=0.3046, pos_boost=1.6837, lr=0.0144, depth=5, max_iter=250
-- Bot HGB: damping=0.2848, pos_boost=1.2582, lr=0.0117, depth=4, max_iter=300
-- 统一 α=0.6（EWMA smoothing），random_state=42
-- Top/Bot 各 8 特征，Walk-Forward CV Top RMSE ≈ 0.0506 ± 0.0060
+当前生产配置（`Top2.799_Bot2.799` 规格组，2813 样本）：
+
+| 表面 | damping | pos_boost | lr    | depth | max_iter | Walk-Forward CV RMSE |
+|---|---|---|---|---|---|---|
+| Top  | 0.3046  | 1.6837    | 0.0144| 5     | 250      | 0.0506 ± 0.0060       |
+| Bot  | 0.2848  | 1.2582    | 0.0117| 4     | 300      | 0.0554 ± 0.0052       |
+
+统一 α=0.6（EWMA smoothing），random_state=42；Top/Bot 各 8 特征。健康检查显示在线 RMSE 提升 **-70% ~ -75%**。
 
 ---
 
-## 目录结构
+## TL;DR
 
-```
-Task1/
-├── tin_coating/               # ← 可 pip install 的子包
-│   ├── data/                  #   清洗 / 特征工程 / 格式转换 / 合并
-│   ├── modeling/              #   核心模型 / CV / 持久化 / 调参
-│   ├── inference/             #   PredictionPipeline 批量推理
-│   ├── eda/                   #   探索性分析
-│   └── diagnostics/           #   残差 / 漂移诊断
-├── cli/main.py                # ← 统一 CLI 入口（argparse，零外部依赖）
-├── run_full_flow.py           # ← 一键全流程（自检→训练→CV→质量→健康→推理）
-├── monitoring/                #   线上监控闭环（quality → health → retrain → gate approve/rollback）
-├── configs/                   #   JSON/YAML 配置镜像（生产配置仍以根目录 group_params_2_799_only.json 为准）
-├── archived/                  #   历史脚本归档
-├── coating_model_by_group.py  #   原生产训练入口（零副作用，保持独立可跑）
-├── group_params_2_799_only.json  #   生产超参（不动）
-├── pyproject.toml             #   pip install -e . 配置
-└── requirements.txt
+**我想先跑一下**：
+
+```bash
+cd Task1
+pip install -e .                        # 安装（首次）
+python run_full_flow.py --quick         # 一键跑全链（~30 秒，跳训练）
+#  → 自检 5 项 OK → 质量门 PASS → 健康 OK → 200 行推理
 ```
 
-> 根目录下的 `predict_by_group.py` / `model_inference.py` / `feature_engineering.py` 等旧脚本保留作参考，日常使用请走 `tin_coating/*` 子包或 `cli/main.py`。
+**我想起 7×24 在线服务**：
+
+```bash
+python cli/main.py serve --host 0.0.0.0 --port 8080
+#  /healthz /readyz /metrics /version /predict /reload
+#  换模型自动热加载，无需重启
+```
+
+**我想部署一个新模型**：
+
+```bash
+python cli/main.py train                # 训练（更新 result/trained_models/）
+python monitoring/gate.py --list       # 看 registry 里的版本历史
+python monitoring/gate.py --approve Top2.799_Bot2.799 Top \
+    --reason "CV 改进" --yes           # 审批部署
+python monitoring/gate.py --rollback Top2.799_Bot2.799 Top --yes   # 回滚
+```
+
+> 训练只更新产物目录，**不会自动上线**。线上服务始终按 `monitoring/registry.json` 的 active 版本推理，必须走 `gate.py --approve`。
+
+---
+
+## 端到端闭环
+
+```mermaid
+flowchart LR
+    A["featured_data.xlsx"] --> B["cli/main.py train"]
+    B --> C["Walk-Forward CV"]
+    B --> D["result/trained_models/{group}/{Top,Bot}_model.joblib"]
+    D --> E["cli/main.py monitor quality"]
+    E --> F{"OK? (exit 0)"}
+    F -- 否 --> E1["写入 alerts.jsonl + 可选 webhook"]
+    F -- 是 --> G["cli/main.py monitor health"]
+    G --> H{"OK / WARN / REGRESSION?"}
+    H -- WARN/REGRESSION --> I["cli/main.py monitor retrain (auto)"]
+    H -- OK --> J["cli/main.py serve 热加载"]
+    I --> K[".pending 模型进 registry.json"]
+    K --> L["monitoring/gate.py --approve"]
+    L --> M["registry.json active 标记切换 + 归档旧线上产物"]
+    M --> J
+    J --> N["/predict /healthz /readyz /metrics"]
+    
+    style A fill:#eee
+    style D fill:#eee
+    style K fill:#fff
+    style M fill:#fff
+```
 
 ---
 
@@ -39,55 +78,180 @@ Task1/
 
 ```bash
 cd Task1
-pip install -e .
+pip install -e .                         # 装 tin_coating + cli 包 + tin-coating 命令
+pip install -r requirements.txt          # 锁定 sklearn<1.5 / pandas<2.2（推荐）
 ```
 
 依赖：numpy / pandas / scikit-learn / matplotlib / seaborn / openpyxl / optuna / joblib / pyyaml。Python 3.9–3.11。
 
 ---
 
-## 快速开始
+## Quick Path
 
-### 一键全流程（推荐先跑这个）
+### Path A：一键跑全链（推荐先跑这个）
 
 ```bash
-cd Task1
-python run_full_flow.py                # 自检 → 训练 → CV → 质量门 → 健康检查 → 批量推理
-python run_full_flow.py --quick        # 跳过训练/CV，约 30 秒跑完检查 + 200 行推理
-python run_full_flow.py --skip-train   # 复用现有模型
-python run_full_flow.py --with-retrain # 额外生成重训候选（只生成 pending，不部署）
+python run_full_flow.py                     # 自检 → 训练 → CV → 质量门 → 健康检查 → 推理
+python run_full_flow.py --quick             # 跳训练/CV，约 30 秒跑完检查 + 200 行推理
+python run_full_flow.py --skip-train        # 复用现有模型
+python run_full_flow.py --with-retrain      # 额外生成重训候选（只产 pending，不部署）
+python run_full_flow.py --rows 1000 --output result/predictions/my.xlsx
 ```
 
-每个阶段打印耗时与结果，最后输出汇总表；推理结果写到 `result/predictions/full_flow_<时间戳>.xlsx`。
-退出码：`0` 正常 / `1` 有非致命告警 / `2` 有致命失败。
+每个阶段打印耗时 ✅/❌，最后汇总表；推理结果写到 `result/predictions/full_flow_<时间戳>.xlsx`（新增 `{Top,Bot}_Online_plus_correction` 和 `{Top,Bot}_Correction_Delta` 两列）。
 
-> 训练只更新 `result/trained_models/` 下的产物，不会自动上线；线上服务始终按 registry 的 active 版本推理，
-> 要部署必须走 `monitoring/gate.py --approve`（见下文）。
+**退出码**：`0` 正常 / `1` 非致命告警 / `2` 致命失败。
 
-### 常用命令
+> ⚠️ **多环境 sklearn 反序列化坑**：registry 里的归档模型是用某个特定 sklearn 版本训练出来的。如果你换了 Python 环境（`.venv` vs anaconda），另一个环境的 sklearn 可能读不了旧模型，报错 `Can't get attribute '__pyx_unpickle_CyAbsoluteError'`。
+> 
+> 此时 `ModelStore` 会自动退回 `result/trained_models/by_group/.../{Top,Bot}_model.joblib` 这份最近一次训练/部署的文件，**服务继续工作**但 `/version` 里标记 `fallback: true`、日志打 WARN。
+> 
+> 要消除 fallback：**同一环境训练 + gate --approve**；或者所有运行环境统一 `pip install -r requirements.txt`。
+
+---
+
+### Path B：起 7×24 在线服务
 
 ```bash
-# Walk-Forward CV（验证当前生产模型在规格组上的稳健性）
-python cli/main.py cv --group Top2.799_Bot2.799 --surface Top
+python cli/main.py serve --host 0.0.0.0 --port 8080
+```
 
-# 线上数据质量检查
-python cli/main.py monitor quality
-python cli/main.py monitor health
+启动时先跑自检（配置 / registry / 模型产物 / 日志目录），任一致命项失败直接退出（fail-fast），不会带病上线。
 
-# 批量推理（对一批新料做 Top / Bot 校正）
-python cli/main.py predict --input new_coils.xlsx --output corrected.xlsx
+**端点**：
 
-# 7×24 在线服务（换模型自动热加载，无需重启）
+| 端点 | 方法 | 用途 |
+|---|---|---|
+| `/healthz` | GET | 存活探针：进程能响应即 200 |
+| `/readyz` | GET | 就绪探针：Top/Bot 模型都已加载才 200，否则 503 |
+| `/metrics` | GET | Prometheus 文本指标（请求数 / 延迟直方图 / 就绪状态 / uptime）|
+| `/version` | GET | 服务版本 + 每个表面的模型版本 + `fallback` 标记 |
+| `/predict` | POST | 批量推理 |
+| `/reload` | POST | 强制重载模型 |
+
+**服务特性**：
+- **热加载**：每次请求顺带检查 registry 的 active 版本 + 文件指纹（`(version, mtime_ns, size)`），换模型不用重启；新模型加载失败时**保留旧模型继续服务**并告警。
+- **并发保护**：信号量限制并发 `service.max_concurrent_requests`（默认 4），排队超时返回 503；请求体上限 16MB，批大小上限 `service.max_batch_rows`（默认 5000）。
+- **鉴权**：设置环境变量 `TIN_API_KEY` 后，`/predict`、`/reload` 需带 `X-API-Key`。
+- **日志**：`monitoring/logs/service.jsonl`（结构化 JSON，10MB 轮转 5 份）；告警：`monitoring/logs/alerts.jsonl`。
+
+`POST /predict` 示例：
+
+```json
+{"surface": "Top", "rows": [{"Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg": 2.81, "Speed[m/min]_Process_Avg": 120, "...": "..."}]}
+```
+
+内部自动构造 `{Top,Bot}_Current_Per_Speed` 衍生列，所以不用上游算好传进来。
+
+---
+
+### Path C：管理模型版本
+
+```bash
+# 1. 列出版本历史（含 active / pending / holdout RMSE / reason）
+python monitoring/gate.py --list
+
+# 2. 审批部署（默认选最新 pending）
+python monitoring/gate.py --approve Top2.799_Bot2.799 Top \
+    --version 2026-11-13_153000 --reason "walk-forward CV 改进" --yes
+
+# 3. 回滚（精确回到上一次真正上线的版本，不跳错）
+python monitoring/gate.py --rollback Top2.799_Bot2.799 Top --yes
+```
+
+所有版本历史写在 `monitoring/registry.json`，每条记录带 `version / cv_rmse_mean / cv_rmse_std / holdout_test_rmse / deploy_reason / previous_active / deployed_path / created_at`。
+
+gate 审批时会**归档旧线上产物**到 `result/trained_models/.../_archive/{surface}_{version}.joblib`，再把新候选复制到线上路径，registry 记 `deployed_path`。回滚时直接用 `previous_active` 指针精确回退，不会踩到从没真正上线过的试验版本。
+
+---
+
+## 目录结构
+
+### 只读代码（git 管）
+
+```
+Task1/
+├── tin_coating/               # pip install 后的主包
+│   ├── data/                  #   清洗 / 特征工程 / 格式转换 / 合并
+│   ├── modeling/              #   核心模型 / Walk-Forward CV / 持久化 / 调参
+│   ├── inference/             #   PredictionPipeline 批量推理
+│   ├── eda/                   #   探索性分析
+│   ├── diagnostics/           #   残差 / 漂移诊断
+│   ├── ops/  ★                #   7×24 运维底座：结构化日志 / Prometheus 指标 / 跨平台 FileLock / 告警 / 自检 / 调度器
+│   └── service/ ★             #   在线 HTTP 服务：/healthz /readyz /metrics /predict /version /reload
+├── cli/main.py                # 统一 CLI 入口（argparse，零外部依赖）
+├── run_full_flow.py           # 一键全流程脚本
+├── monitoring/                # 监控闭环脚本（见下表）
+├── configs/                   # YAML 主配置 + 环境切换（app.yaml 是生产配置镜像）
+├── pyproject.toml             # pip install -e . + tin-coating console_scripts
+├── pytest.ini / tests/        # 31 项 pytest
+├── Dockerfile / docker-compose.yml / .dockerignore
+├── .github/workflows/ci.yml   # push 时跑 pytest
+├── coating_model_by_group.py  # 原生产训练入口（零副作用，承诺一行未改）
+├── group_params_2_799_only.json  # 生产超参（不动）
+├── legacy_*.py                # 原根目录脚本改名前缀保留（feature_engineering / predict_by_group 等）
+├── archived/                  # 历史脚本归档
+└── requirements.txt
+```
+
+> 原 `predict_by_group.py` / `model_inference.py` / `feature_engineering.py` / `residual_diagnostics.py` 已不在根目录（改为 `legacy_` 前缀或进 `archived/`）。日常使用请走 `tin_coating/*` 子包或 `cli/main.py`。
+
+### 运行时持久状态（要备份）
+
+| 路径 | 内容 |
+|---|---|
+| `monitoring/registry.json` | 版本历史：各规格组 + 表面的版本、指标、active 标记、`previous_active` 指针、`deployed_path` |
+| `result/trained_models/by_group/{group}/` | 每个规格组的在线产物：`{Top,Bot}_model.joblib` + `{Top,Bot}_metadata.json` |
+| `result/trained_models/.../_archive/` | 归档的历史线上模型（`{surface}_{version}.joblib`）|
+
+### 运行时临时文件（可删、会自动清理）
+
+| 路径 | 内容 | 清理策略 |
+|---|---|---|
+| `monitoring/logs/service.jsonl` 等 | 服务/ops/告警日志（结构化 JSON）| 文件轮转：10MB × 5 份（旧的自动淘汰）|
+| `monitoring/logs/alerts.jsonl` | 告警事件（Notifier 落盘）| keep_logs_days=30 自动删除超过 30 天的日志/报告 |
+| `monitoring/reports/*.json` | 质量门/健康检查/重训报告 | 同上 |
+| `monitoring/locks/job_*.lock` / `registry.lock` | 跨进程 FileLock 占位 | 进程正常退出时释放；进程崩溃 OS 自动解锁；可手动删残留 |
+| `result/predictions/full_flow_*.xlsx` | run_full_flow.py 产出 | 无自动清理 |
+
+---
+
+## CLI 参考
+
+所有子命令返回**语义化 exit code**：`0` 正常 / `1` 警告 / `2` 失败 / `3` 跳过（ops run 锁冲突）。
+
+```bash
+python cli/main.py --help
+
+# ── 训练 / 验证 ──
+python cli/main.py train                         # 按 prod_config 跑正式训练
+python cli/main.py cv  --group Top2.799_Bot2.799 --surface Top   # Walk-Forward CV
+
+# ── 推理 ──
+python cli/main.py predict --input new.xlsx --output corrected.xlsx
+
+# ── 监控 ──
+python cli/main.py monitor quality               # 数据质量门
+python cli/main.py monitor health                # 月度健康检查
+python cli/main.py monitor retrain --force       # 自动重训候选（产 .pending）
+python cli/main.py monitor list --surface Top    # 列出 registry 版本
+python cli/main.py monitor approve Top2.799_Bot2.799 Top --reason "改进" --yes
+python cli/main.py monitor rollback Top2.799_Bot2.799 Top --yes
+
+# ── 在线服务 ──
 python cli/main.py serve --host 0.0.0.0 --port 8080
 
-# 完整 CLI 帮助
-python cli/main.py --help
-python cli/main.py ops --help
+# ── 7×24 运维（给 cron/任务计划调用）──
+python cli/main.py ops selfcheck                 # 上线前自检
+python cli/main.py ops run --job quality         # 数据质量门
+python cli/main.py ops run --job health          # 月度健康检查
+python cli/main.py ops run --job retrain         # 自动重训候选
 ```
 
-### 直接用 tin_coating 子包
+直接用 Python API：
 
 ```python
+import pandas as pd
 from tin_coating import (
     ResidualCorrectionModel,
     run_cv_for_surface,
@@ -97,92 +261,40 @@ from tin_coating import (
     PredictionPipeline,
     get_feature_cols,
 )
-import pandas as pd
 
 df = pd.read_excel("result/data/feature_engineered_data/featured_data.xlsx")
 df = build_setpoint_group_key(df)
 group_df = df[df["Setpoint_Group_Label"] == "Top2.799_Bot2.799"].copy()
 
 cfg = load_pipeline_config("group_params_2_799_only.json")
-params = get_params_for_group(cfg, "Top2.799_Bot2.799", "Top")
-
-# CV
-cv = run_cv_for_surface(group_df, "Top", params)
+cv = run_cv_for_surface(group_df, "Top", get_params_for_group(cfg, "Top2.799_Bot2.799", "Top"))
 print(f"Top RMSE = {cv['cv_rmse_mean']:.4f} ± {cv['cv_rmse_std']:.4f}")
 
-# 推理
 pipeline = PredictionPipeline("result/trained_models/by_group/Top2.799_Bot2.799")
 result = pipeline.predict_both_surfaces(group_df.head(50), group_label="Top2.799_Bot2.799")
 ```
 
 ---
 
-## 线上模型管理（monitoring/）
+## 7×24 运维
+
+### 调度器（ops run）
 
 ```bash
-# 1. 质量门：数据分布 + 缺失 + 规格占比
-python monitoring/check_data_quality.py
-# 2. 健康检查：训练 vs 月度 RMSE / MAE / 漂移
-python monitoring/check_monthly_health.py
-# 3. 自动重训候选：触发 Walk-Forward CV，产出 .pending 模型
-python monitoring/auto_retrain_candidate.py --force
-# 4. 审批 Gate：唯一有权覆盖线上 joblib 的脚本
-python monitoring/gate.py --list                                        # 列出版本历史
-python monitoring/gate.py --approve Top2.799_Bot2.799 Top \
-    --reason "walk-forward CV 改进" --yes                              # 部署
-python monitoring/gate.py --rollback Top2.799_Bot2.799 Top --yes        # 回滚
+python cli/main.py ops selfcheck                 # 5 项配置/registry/模型/日志目录/特征数据
+python cli/main.py ops run --job quality
+python cli/main.py ops run --job health
+python cli/main.py ops run --job retrain
 ```
 
-所有版本历史写在 `monitoring/registry.json`，每条记录带 `cv_rmse_mean / cv_rmse_std / holdout_test_rmse / deploy_reason`，随时可 `--rollback`。
+- **退出码**：`0` 正常 / `1` 警告 / `2` 失败 / `3` 跳过（文件锁 `job_<name>.lock` 已占用 → 上一轮未结束）
+- **告警**：失败/警告自动写 `monitoring/logs/alerts.jsonl`；配置 `TIN_ALERT_WEBHOOK` 时同时 POST（指数退避 5→10→20s，任何异常内部吞掉，永不影响主流程）
+- **锁**：跨进程 FileLock（Windows 用 msvcrt、POSIX 用 fcntl）；registry 读改写也走同一把锁，定时任务和人工操作不会互相覆盖
+- **清理**：`keep_logs_days=30` 自动删除超过 30 天的日志 + 报告 JSON（不动 joblib / .lock）
 
----
+### OS 调度示例
 
-## 7×24 无人值守
-
-### 1. 在线推理服务
-
-```bash
-python cli/main.py serve --host 0.0.0.0 --port 8080
-```
-
-启动时先跑自检（配置 / registry / 模型产物 / 日志目录），任一致命项失败直接退出（fail-fast），不会带病上线。
-
-| 端点 | 方法 | 用途 |
-|---|---|---|
-| `/healthz` | GET | 存活探针：进程能响应即 200 |
-| `/readyz` | GET | 就绪探针：Top/Bot 模型都已加载才 200，否则 503 |
-| `/metrics` | GET | Prometheus 文本指标（请求数 / 延迟直方图 / 预测行数 / 就绪状态）|
-| `/version` | GET | 服务版本 + 当前模型版本 |
-| `/predict` | POST | 批量推理 `{"surface":"Top|Bot|both","rows":[...]}` |
-| `/reload` | POST | 强制重载模型 |
-
-- **模型热加载**：每次请求顺带检查 registry 里 active 版本与文件指纹，换模型不用重启；新模型加载失败时保留旧模型继续服务并告警。
-- **并发保护**：信号量限制并发（`service.max_concurrent_requests`），排队超时返回 503；请求体上限 16MB，批大小上限 `service.max_batch_rows`。
-- **鉴权**：设置环境变量 `TIN_API_KEY` 后，`/predict`、`/reload` 需带 `X-API-Key`。
-- 日志：`monitoring/logs/service.jsonl`（结构化 JSON，10MB 轮转 5 份）；告警：`monitoring/logs/alerts.jsonl`。
-
-`POST /predict` 示例：
-
-```json
-{"surface": "Top", "rows": [{"Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg": 2.81, "...": "..."}]}
-```
-
-### 2. 无人值守任务
-
-```bash
-python cli/main.py ops selfcheck              # 上线前/巡检：配置、registry、模型、日志目录
-python cli/main.py ops run --job quality      # 数据质量门
-python cli/main.py ops run --job health       # 月度健康检查
-python cli/main.py ops run --job retrain      # 自动重训候选（生成 pending，等 gate 审批）
-```
-
-退出码：`0` 正常 / `1` 警告 / `2` 失败 / `3` 跳过（同一 job 上一轮未结束）。失败或警告会自动写 `monitoring/logs/alerts.jsonl`；配置了 `TIN_ALERT_WEBHOOK` 时同时 POST 到 webhook（JSON body 含 `level/title/detail`）。
-
-同一 job 用文件锁 `monitoring/locks/job_<name>.lock` 防重叠执行；registry 的读改写也走同一把跨进程锁，定时任务和人工操作不会互相覆盖。
-
-### 3. OS 调度示例
-
-**Linux / cron**（每天 02:00 质量门、每月 1 号健康检查）：
+**Linux / cron**：
 
 ```cron
 0 2 * * *    cd /opt/tin-coating/Task1 && python cli/main.py ops run --job quality  >> monitoring/logs/cron.log 2>&1
@@ -211,16 +323,16 @@ KillSignal=SIGTERM
 WantedBy=multi-user.target
 ```
 
-**Windows / 任务计划**（开机常驻；`python` 建议写绝对路径，SYSTEM 账户 PATH 可能不同）：
+**Windows / 任务计划**：
 
 ```powershell
 schtasks /Create /TN "TinCoating-Serve" /SC ONSTART /RU SYSTEM /RL HIGHEST /F /TR "cmd /c cd /d \"E:\SGAI_Project\2026\Tin coating\Task1\" && python cli/main.py serve"
 schtasks /Create /TN "TinCoating-Quality" /SC DAILY /ST 02:00 /F /TR "cmd /c cd /d \"E:\SGAI_Project\2026\Tin coating\Task1\" && python cli/main.py ops run --job quality"
 ```
 
-> 进程管理器（systemd / NSSM / 任务计划）只需保证：进程异常退出后自动拉起；拉起后 `/readyz` 返回 200 即恢复服务。
+进程管理器（systemd / NSSM / 任务计划）只需保证：**进程异常退出后自动拉起；拉起后 `/readyz` 返回 200 即恢复服务**。
 
-### 4. 运维参数
+### 运维参数
 
 `configs/app.yaml`：
 
@@ -232,28 +344,72 @@ service:
   max_concurrent_requests: 4
   request_timeout_seconds: 30
   api_key_env: TIN_API_KEY
+
 ops:
   lock_timeout_seconds: 5
   alert_webhook_env: TIN_ALERT_WEBHOOK
+  keep_logs_days: 30
 ```
 
-可用 `TIN_COATING__SERVICE__PORT=9090` 这类环境变量临时覆盖，无需改文件。
+可用 `TIN_COATING__SERVICE__PORT=9090` 这类环境变量临时覆盖，无需改文件。`TIN_COATING_ROOT` / `TIN_COATING_ENV` 等"控制型"env var 不会被配置系统误消费。
+
+### 容器化（已写，尚未验收）
+
+```bash
+docker build -t tin-coating:latest .
+docker compose up -d
+curl http://localhost:8080/readyz
+docker compose logs -f tin-coating
+```
+
+> ⚠️ **Dockerfile / docker-compose.yml / .dockerignore / .github/workflows/ci.yml 都已经写好**，但还没在 CI 里真跑过 `docker build`，`docker-compose.yml` 也没写 `healthcheck:` 和 `restart: unless-stopped`。上生产前必须亲自 build → 起 → `curl /readyz` → kill → 看自动重启 → 再 `/readyz` 一次。
 
 ---
 
-## 全局自检
+## 测试矩阵
 
 ```bash
+# 首选
+pytest tests/                          # 当前 31 passed
+
+# 单独跑的冒烟脚本（9 项）
 python __main_smoke_test.py
 ```
 
-跑 8 项：tin_coating 全部模块 import / 原 coating_model_by_group 零副作用 / Walk-Forward CV RMSE 范围 / CLI cv / CLI monitor quality / 目录结构 / 单向依赖闭环。任何一项 FAIL 会 exit 1 并打印明细。
+| 文件 | 覆盖范围 |
+|---|---|
+| `tests/test_smoke.py` | 9 项：所有子包可 import、原入口零副作用、Walk-Forward CV RMSE 范围、CLI cv/quality、目录布局、单向依赖闭环（run_full_flow.py 作为编排脚本豁免 leak import 检查）|
+| `tests/test_ops.py` | 结构化日志 JSON、Prometheus 指标渲染、`FileLock` 互斥、`Notifier` 文件通道、**`registry.json` 6 线程 × 5 次并发写不丢数据**、`run_selfcheck`、env override dotted key 隔离 meta env var |
+| `tests/test_service.py` | 契约反例（缺列 / 空数组 / 非数值）+ **真实起服务**（随机端口 ThreadingHTTPServer）跑：`/healthz`、`/readyz`、`/metrics`、`/version`、`/predict` happy / both / 400 / 404、**并发 16 请求**、`ModelStore` 热加载（mtime 变化即重载）、**fallback 降级**（primary artifact 损坏但 live 目录可用 → ready=True）、**全部不可用时 ready=False**、API Key |
+
+退出码任何一项 FAIL 会 exit 1 并打印明细。
 
 ---
 
 ## 关键约束（不要动）
 
-1. **生产入口零副作用** —— `coating_model_by_group.py` 可以独立 import 和 `python coating_model_by_group.py` 运行，导出的函数/类/常量签名不变。
-2. **单向依赖** —— 新代码 `tin_coating/*` / `cli/*` / `monitoring/*` 可以 import 顶层旧代码，但旧代码永不 import 新代码。`__main_smoke_test.py` 的"原顶层 .py 无 tin_coating/cli/monitoring import"检查保证这一点。
-3. **规格组过滤** —— `Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min` `.round(3) == 2.799`（Bot 同理）。
-4. **Lab 列名是中文** —— `上表面镀层重量A(XA1_0)` / `下表面镀层重量A(XA1_0)`，不是英文 Top/`Bot...`。
+| # | 约束 | 原因 |
+|---|---|---|
+| 1 | **生产入口零副作用** —— `coating_model_by_group.py` 可以独立 import 和 `python coating_model_by_group.py` 运行，导出的函数/类/常量签名不变 | 这是原生产脚本，承诺**一行未改**；所有新代码必须单向依赖它 |
+| 2 | **单向依赖** —— 新代码 `tin_coating/*` / `cli/*` / `monitoring/*` 可以 import 顶层旧代码，但旧代码永不 import 新代码；`__main_smoke_test.py` 的"原顶层 .py 无 tin_coating/cli/monitoring import"检查保证这一点 | 避免旧脚本被新包"感染"；保持独立可跑 |
+| 3 | **规格组过滤** —— `Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min` `.round(3) == 2.799`（Bot 同理）| 生产超参锁死；改这里等于换了生产模型的训练样本空间 |
+| 4 | **Lab 列名是中文** —— `上表面镀层重量A(XA1_0)` / `下表面镀层重量A(XA1_0)`，不是英文 `Top*` / `Bot*` | 上游 Excel 产线导出的列名；硬编码在 `group_params_2_799_only.json` 和 monitoring 脚本里 |
+
+---
+
+## 附录 A：常见坑
+
+**Q：我的 sklearn 版本和 registry 归档模型对不上，跑推理报反序列化错？**  
+A：ModelStore 会自动退回 live 目录产物（最近一次训练/部署的那份），服务不挂，`/version` 标记 `fallback: true`，日志打 WARN。长期解法：同一环境训练 + `gate --approve`，或所有运行环境 `pip install -r requirements.txt` 把 sklearn/pandas/numpy 版本对齐。
+
+**Q：`ops run --job retrain` 返回 exit 3？**  
+A：同一 job 上一轮还没结束，文件锁 `job_retrain.lock` 没释放（或上次崩溃残留）。可以手动删 `monitoring/locks/job_retrain.lock`，等进程退出或杀进程。
+
+**Q：服务起来后 `/readyz` 返回 503？**  
+A：Top 或 Bot 其中一个模型加载失败。先看 `/version` 里哪一面没 loaded、是不是 `fallback=false` 但 `path` 不存在；再看 `monitoring/logs/service.jsonl` 里 `model_load_failed` 那条的具体 err；再手动 `python monitoring/gate.py --list` 确认 registry.json 的 active 版本是否在、路径是否对。
+
+**Q：我想换一个规格组（不是 `2.799`）训练和部署？**  
+A：改 `group_params_2_799_only.json` 的 `target_groups` 数组，然后 `cli/main.py train --config` 指定新的 JSON。CV 和质量门会按你传的 group 过滤。目前 pipeline 的 `default_group` 在 `configs/app.yaml`，可以改；多规格组矩阵跑法没做，要自己跑多次。
+
+**Q：Docker 里起服务，模型怎么传进去？**  
+A：`docker-compose.yml` 现在**没写卷挂载**。上生产前必须加上，把 `monitoring/registry.json`、`monitoring/logs/`、`result/trained_models/` 挂进容器的相应路径，否则每次容器重建模型和版本历史就丢了。

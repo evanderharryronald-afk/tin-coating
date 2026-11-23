@@ -312,6 +312,8 @@ def feature_relationship_diagnostics(
         })
 
     print(f"[特征关系诊断] {label} 共分析 {len(feature_significance_rows)} 个特征，图保存于: {save_dir}")
+    if not feature_significance_rows:
+        return pd.DataFrame(columns=['特征', '类型', 'F统计量', 'p值', '是否显著相关(p<0.05)'])
     return pd.DataFrame(feature_significance_rows).sort_values('p值', na_position='last')
 
 
@@ -418,21 +420,34 @@ def explainability_score(residuals: pd.Series, X: pd.DataFrame, label: str,
         return None
 
     residuals = pd.Series(residuals).reindex(X.index)
-    valid = residuals.notna()
+    valid = residuals.notna() & X.notna().all(axis=1)
     X_valid = X.loc[valid].copy()
     y_valid = residuals.loc[valid]
+
+    if len(X_valid) < 20:
+        print(f"[可解释性评分] 有效样本 {len(X_valid)} 太少，跳过。")
+        return None
+
+    # 自适应 cv 折数：至少 10 样本才能保留 5 折；少了就降
+    actual_cv = min(cv, len(X_valid) // 5)
+    actual_cv = max(2, actual_cv)
 
     # 类别特征简单编码为 category dtype，交给 HistGradientBoostingRegressor 原生处理
     _, categorical_cols = _infer_feature_types(X_valid, categorical_features=categorical_features)
     for col in categorical_cols:
         X_valid[col] = X_valid[col].astype('category')
 
-    model = HistGradientBoostingRegressor(
-        max_iter=150, max_depth=4, learning_rate=0.05,
-        categorical_features=categorical_cols if categorical_cols else None,
-        random_state=random_state,
-    )
-    scores = cross_val_score(model, X_valid, y_valid, cv=cv, scoring='r2')
+    try:
+        model = HistGradientBoostingRegressor(
+            max_iter=150, max_depth=4, learning_rate=0.05,
+            categorical_features=categorical_cols if categorical_cols else None,
+            random_state=random_state,
+        )
+        scores = cross_val_score(model, X_valid, y_valid, cv=actual_cv, scoring='r2')
+    except Exception as e:
+        print(f"[可解释性评分] 交叉验证失败 ({e})，跳过。")
+        return None
+
     mean_r2 = scores.mean()
 
     print(f"[可解释性评分] {label} 残差二次建模 交叉验证R² = {mean_r2:.4f} "

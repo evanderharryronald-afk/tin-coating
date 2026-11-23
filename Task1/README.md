@@ -179,6 +179,7 @@ Task1/
 │   ├── diagnostics/           #   残差 / 漂移诊断
 │   ├── ops/  ★                #   7×24 运维底座：结构化日志 / Prometheus 指标 / 跨平台 FileLock / 告警 / 自检 / 调度器
 │   └── service/ ★             #   在线 HTTP 服务：/healthz /readyz /metrics /predict /version /reload
+├── docs/                      #   CODEMAP.md — 新旧代码边界 + 完整结构说明
 ├── cli/main.py                # 统一 CLI 入口（argparse，零外部依赖）
 ├── run_full_flow.py           # 一键全流程脚本
 ├── monitoring/                # 监控闭环脚本（见下表）
@@ -230,6 +231,14 @@ python cli/main.py cv  --group Top2.799_Bot2.799 --surface Top   # Walk-Forward 
 # ── 推理 ──
 python cli/main.py predict --input new.xlsx --output corrected.xlsx
 
+# ── 数据分析 / 诊断 ──
+python cli/main.py eda dist     --group Top2.799_Bot2.799           # 描述统计
+python cli/main.py eda corr     --group Top2.799_Bot2.799           # 相关性 + MI + DCOR
+python cli/main.py eda surface  --group Top2.799_Bot2.799           # 分组 EDA 预诊断
+python cli/main.py diagnose drift     --group Top2.799_Bot2.799     # KS 漂移（残差前后 80/20 切分）
+python cli/main.py diagnose residual   --group Top2.799_Bot2.799     # 残差分布 + QQ + ACF + 异方差
+python cli/main.py diagnose interpret  --group Top2.799_Bot2.799     # Permutation + SHAP + PDP（SHAP 可选）
+
 # ── 监控 ──
 python cli/main.py monitor quality               # 数据质量门
 python cli/main.py monitor health                # 月度健康检查
@@ -246,6 +255,8 @@ python cli/main.py ops selfcheck                 # 上线前自检
 python cli/main.py ops run --job quality         # 数据质量门
 python cli/main.py ops run --job health          # 月度健康检查
 python cli/main.py ops run --job retrain         # 自动重训候选
+python cli/main.py ops run --job drift           # 在线漂移探针（KS-test）
+python cli/main.py ops run --job report          # 聚合 quality + health + drift，写 weekly_overview JSON
 ```
 
 直接用 Python API：
@@ -285,12 +296,16 @@ python cli/main.py ops selfcheck                 # 5 项配置/registry/模型/�
 python cli/main.py ops run --job quality
 python cli/main.py ops run --job health
 python cli/main.py ops run --job retrain
+python cli/main.py ops run --job drift           # 在线漂移探针：KS-test（残差前后 80/20 切分），落盘 drift_<group>.json
+python cli/main.py ops run --job report          # 聚合 quality + health + drift，落盘 weekly_overview_<group>.json
 ```
 
 - **退出码**：`0` 正常 / `1` 警告 / `2` 失败 / `3` 跳过（文件锁 `job_<name>.lock` 已占用 → 上一轮未结束）
 - **告警**：失败/警告自动写 `monitoring/logs/alerts.jsonl`；配置 `TIN_ALERT_WEBHOOK` 时同时 POST（指数退避 5→10→20s，任何异常内部吞掉，永不影响主流程）
 - **锁**：跨进程 FileLock（Windows 用 msvcrt、POSIX 用 fcntl）；registry 读改写也走同一把锁，定时任务和人工操作不会互相覆盖
 - **清理**：`keep_logs_days=30` 自动删除超过 30 天的日志 + 报告 JSON（不动 joblib / .lock）
+- **drift job** 纯函数入口：`tin_coating.diagnostics.drift.ks_test_drift(values, ratio=0.8, ks_alpha=0.05, mean_diff_threshold=0.05)`，返回 `(ks_stat, ks_p, mean_diff, verdict ∈ {OK, WARN, DRIFT})`
+- **report job** 汇总规则：`quality.pass=False` 或 `health.verdict=REGRESSION` 或 `drift.verdict=DRIFT` → FAIL；`health=WARN` 或 `drift=WARN` → WARN；其余 OK
 
 ### OS 调度示例
 

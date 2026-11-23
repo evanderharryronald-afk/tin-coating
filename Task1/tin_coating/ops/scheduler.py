@@ -23,7 +23,7 @@ from tin_coating.ops.log import get_logger, log_event
 from tin_coating.ops.metrics import METRICS
 from tin_coating.ops.notify import Notifier
 
-JOBS = ("quality", "health", "retrain")
+JOBS = ("quality", "health", "retrain", "drift", "report")
 
 
 def _prune_old_files(cfg, logger) -> None:
@@ -115,7 +115,7 @@ def run_job(job: str, data: str | None = None, force: bool = False,
             status = {"OK": "ok", "WARN": "warn"}.get(verdict, "fail")
             exit_code = {"ok": 0, "warn": 1}.get(status, 2)
             detail = f"verdict={verdict}"
-        else:  # retrain
+        elif job == "retrain":
             import auto_retrain_candidate as r
             rep = r.run(feature_data, force=force, skip_quality_check=False)
             skipped = rep.get("skipped") or []
@@ -132,6 +132,150 @@ def run_job(job: str, data: str | None = None, force: bool = False,
             else:
                 status, exit_code = "warn", 1
                 detail = "no_pending"
+        elif job == "drift":
+            import pandas as pd
+            import joblib
+            import numpy as np
+            from tin_coating.modeling.params import (
+                build_setpoint_group_key, get_feature_cols,
+            )
+            from tin_coating.diagnostics.drift import ks_test_drift
+
+            try:
+                # 向后兼容：尝试注册旧 __main__ 下的 ResidualCorrectionModel
+                import coating_model_by_group  # noqa
+                from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
+            except Exception:
+                pass
+
+            g = group_label or str(cfg.app.default_group)
+            df = pd.read_excel(feature_data)
+            df = build_setpoint_group_key(df)
+            df = df[df["Setpoint_Group_Label"] == g].copy()
+            for s in ["Top", "Bot"]:
+                cs, sp = f"{s}_Current_Sum", "Speed[m/min]_Process_Avg"
+                if cs in df.columns and sp in df.columns:
+                    df[f"{s}_Current_Per_Speed"] = df[cs] / (df[sp] + 1e-5)
+
+            model_dir = cfg.resolve("paths.online_jobs")
+            verdicts = []
+            for surface in ("Top", "Bot"):
+                feat_cols = get_feature_cols(surface)
+                online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{surface.upper()}_Avg"
+                model_path = model_dir / f"{surface}_model.joblib"
+                sub = df.dropna(subset=feat_cols + [online_col])
+                if (not model_path.exists()) or len(sub) < 60:
+                    verdicts.append((surface, "OK", "skip"))
+                    continue
+                try:
+                    m = joblib.load(model_path)
+                except Exception as e:
+                    verdicts.append((surface, "WARN", f"model_load_failed:{type(e).__name__}"))
+                    continue
+                pred, _ = m.predict_smooth(sub[feat_cols], sub[online_col])
+                resids = pred.values - sub[online_col].values
+                ks, p, md, v = ks_test_drift(resids, ratio=0.8)
+                verdicts.append((surface, v, f"ks={ks:.3f} p={p:.3g} mean_diff={md:.3f}"))
+
+            worst = max(("OK", "WARN", "DRIFT").index(v) for _, v, _ in verdicts)
+            status = ("ok", "warn", "fail")[worst]
+            exit_code = (0, 1, 2)[worst]
+            detail = "; ".join(f"{s}:{v}({d})" for s, v, d in verdicts)
+
+            # 落盘一份 JSON 摘要（给 Grafana / 自己查都方便）
+            try:
+                import json
+                (cfg.resolve("paths.reports_dir")).mkdir(parents=True, exist_ok=True)
+                out = cfg.resolve("paths.reports_dir") / f"drift_{g}.json"
+                out.write_text(json.dumps({
+                    "group": g, "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "verdicts": [{"surface": s, "verdict": v, "detail": d}
+                                 for s, v, d in verdicts],
+                    "worst_verdict": ("OK", "WARN", "DRIFT")[worst],
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        elif job == "report":
+            # 聚合 quality / health / drift 三份摘要，写一份总览 JSON
+            import json
+            import time as _t
+            try:
+                import check_data_quality as q
+                import check_monthly_health as h
+                r = {}
+                g = group_label or str(cfg.app.default_group)
+                r["generated_at"] = _t.strftime("%Y-%m-%d %H:%M:%S")
+                r["group"] = g
+                r["quality"] = q.run(feature_data, silent=True)
+                r["health"] = h.run(feature_data, silent=True)
+                # drift 复跑一遍；不想重复算可以在 quality/health 报告里先写临时文件
+                import pandas as pd
+                import joblib
+                from tin_coating.modeling.params import build_setpoint_group_key, get_feature_cols
+                from tin_coating.diagnostics.drift import ks_test_drift
+                try:
+                    import coating_model_by_group  # noqa
+                    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
+                except Exception:
+                    pass
+                df = pd.read_excel(feature_data)
+                df = build_setpoint_group_key(df)
+                df = df[df["Setpoint_Group_Label"] == g].copy()
+                for s in ["Top", "Bot"]:
+                    cs, sp = f"{s}_Current_Sum", "Speed[m/min]_Process_Avg"
+                    if cs in df.columns and sp in df.columns:
+                        df[f"{s}_Current_Per_Speed"] = df[cs] / (df[sp] + 1e-5)
+                model_dir = cfg.resolve("paths.online_jobs")
+                drift_verdicts = []
+                for surface in ("Top", "Bot"):
+                    feat_cols = get_feature_cols(surface)
+                    online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{surface.upper()}_Avg"
+                    model_path = model_dir / f"{surface}_model.joblib"
+                    sub = df.dropna(subset=feat_cols + [online_col])
+                    if model_path.exists() and len(sub) >= 60:
+                        try:
+                            m = joblib.load(model_path)
+                            pred, _ = m.predict_smooth(sub[feat_cols], sub[online_col])
+                            ks, p, md, v = ks_test_drift(pred.values - sub[online_col].values)
+                            drift_verdicts.append({"surface": surface, "verdict": v,
+                                                   "ks": ks, "p": p, "mean_diff": md})
+                        except Exception as e:
+                            drift_verdicts.append({"surface": surface, "verdict": f"SKIP:{type(e).__name__}"})
+                    else:
+                        drift_verdicts.append({"surface": surface, "verdict": "SKIP"})
+                r["drift"] = drift_verdicts
+
+                out_dir = cfg.resolve("paths.reports_dir")
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out = out_dir / f"weekly_overview_{g}.json"
+                out.write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                q_pass = bool(r["quality"].get("pass"))
+                h_verdict = r["health"].get("overall_verdict", "WARN")
+                d_worst = "OK"
+                for dv in drift_verdicts:
+                    if dv.get("verdict") == "DRIFT":
+                        d_worst = "DRIFT"
+                        break
+                    if dv.get("verdict") == "WARN":
+                        d_worst = "WARN"
+                combined = {"OK": "OK", "WARN": "WARN", "REGRESSION": "FAIL",
+                            "DRIFT": "FAIL"}.get(h_verdict, "FAIL")
+                if d_worst == "DRIFT":
+                    combined = "FAIL"
+                elif d_worst == "WARN" and combined != "FAIL":
+                    combined = "WARN"
+                if not q_pass:
+                    combined = "FAIL"
+                status_map = {"OK": ("ok", 0), "WARN": ("warn", 1), "FAIL": ("fail", 2)}
+                status, exit_code = status_map[combined]
+                detail = f"q_pass={q_pass} h_verdict={h_verdict} d_worst={d_worst}"
+            except Exception as e:
+                status, exit_code = "fail", 2
+                detail = f"{type(e).__name__}: {e}"
+        else:
+            raise ValueError(f"未知 job: {job}，可选 {JOBS}")
     except Exception as e:
         status, exit_code = "fail", 2
         detail = f"{type(e).__name__}: {e}"

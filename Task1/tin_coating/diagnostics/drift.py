@@ -217,3 +217,40 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def ks_test_drift(values, ratio: float = 0.8, min_samples: int = 30,
+                  ks_alpha: float = 0.05, mean_diff_threshold: float = 0.05):
+    """轻量漂移检测：前 ratio vs 后 (1-ratio) 的 KS 检验 + 均值差。
+
+    纯函数，CLI 和 ops scheduler 都能直接用，不依赖任何绘图模块。
+
+    返回: (ks_stat, ks_p, mean_diff_post_minus_pre, verdict)
+      verdict ∈ {"OK", "WARN", "DRIFT"}
+    """
+    import numpy as _np
+    from scipy import stats as _stats
+
+    y = _np.asarray(values, dtype=float)
+    y = y[~_np.isnan(y)]
+    n = len(y)
+    if n < min_samples:
+        return _np.nan, _np.nan, _np.nan, "OK"
+
+    split = int(n * ratio)
+    a = y[:split]
+    b = y[split:]
+    if len(a) < 10 or len(b) < 10:
+        return _np.nan, _np.nan, _np.nan, "OK"
+
+    ks_stat, ks_p = _stats.ks_2samp(a, b)
+    mean_diff = float(b.mean() - a.mean())
+
+    if ks_p < ks_alpha and abs(mean_diff) > mean_diff_threshold:
+        verdict = "DRIFT"
+    elif ks_p < ks_alpha:
+        verdict = "WARN"
+    else:
+        verdict = "OK"
+
+    return float(ks_stat), float(ks_p), mean_diff, verdict

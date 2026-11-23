@@ -161,6 +161,213 @@ def _run_monitor(subcmd: str, args):
         return 1
 
 
+def cmd_eda(args):
+    """数据分析子命令：dist / corr / mi / surface（相关性 + 互信息 + 分组 EDA）。"""
+    import pandas as pd
+    from pathlib import Path
+
+    data_path = args.data or str(_CFG.resolve("paths.feature_data"))
+    group = args.group or _CFG.app.default_group
+    surface = args.surface
+    df = pd.read_excel(data_path)
+
+    # 过滤到指定规格组
+    if group:
+        from tin_coating.modeling.params import build_setpoint_group_key
+        df = build_setpoint_group_key(df)
+        df = df[df["Setpoint_Group_Label"] == group].copy()
+        print(f"[eda] group={group} n={len(df)}")
+
+    # 确保有 _Current_Per_Speed 衍生列
+    for s in ["Top", "Bot"]:
+        cs, sp = f"{s}_Current_Sum", "Speed[m/min]_Process_Avg"
+        if cs in df.columns and sp in df.columns and f"{s}_Current_Per_Speed" not in df.columns:
+            df[f"{s}_Current_Per_Speed"] = df[cs] / (df[sp] + 1e-5)
+
+    out_dir = Path(args.output) if args.output else Path("result/eda") / (group or "all")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.sub == "corr":
+        from tin_coating.eda.analyzer import SurfaceCorrelationAnalyzer
+        ana = SurfaceCorrelationAnalyzer(default_save_dir=str(out_dir))
+        surfaces = [surface] if surface else ["Top", "Bot"]
+        for s in surfaces:
+            print(f"\n== corr {s} ==")
+            ana.analyze_surface(df, surface=s, save_dir=str(out_dir / s),
+                               corr_method="both", compute_mi=True, compute_dcor=False,
+                               compute_mi_matrix=False, compute_dcor_matrix=False)
+    elif args.sub == "surface":
+        from tin_coating.eda.grouping import GroupEDADiagnoser
+        surfaces = [surface] if surface else ["Top", "Bot"]
+        d = GroupEDADiagnoser(surfaces=surfaces,
+                              pre_diagnosis_dir=str(out_dir / "pre"),
+                              post_diagnosis_dir=str(out_dir / "post"))
+        d.pre_modeling_diagnosis(df, group_label=group)
+    else:  # dist 默认
+        from tin_coating.modeling.params import get_feature_cols as _get_feat
+        surfaces = [surface] if surface else ["Top", "Bot"]
+        for s in surfaces:
+            cols = _get_feat(s)
+            exist = [c for c in cols if c in df.columns]
+            if not exist:
+                continue
+            print(f"\n== dist {s} ==")
+            stats = df[exist].describe().T[["count", "mean", "std", "min", "25%", "50%", "75%", "max"]]
+            stats.to_csv(out_dir / f"dist_{s}.csv", encoding="utf-8-sig")
+            print(stats.round(3).to_string())
+    print(f"[eda] saved → {out_dir}")
+    return 0
+
+
+def cmd_diagnose(args):
+    """诊断子命令：residual（残差 + QQ + ACF）/ drift（漂移 KS）/ interpret（SHAP/PDP）。"""
+    import pandas as pd
+    from pathlib import Path
+
+    data_path = args.data or str(_CFG.resolve("paths.feature_data"))
+    group = args.group or _CFG.app.default_group
+    surface = args.surface
+    df = pd.read_excel(data_path)
+
+    from tin_coating.modeling.params import build_setpoint_group_key, get_feature_cols
+    df = build_setpoint_group_key(df)
+    df = df[df["Setpoint_Group_Label"] == group].copy()
+    # 构造衍生列
+    for s in ["Top", "Bot"]:
+        cs, sp = f"{s}_Current_Sum", "Speed[m/min]_Process_Avg"
+        if cs in df.columns and sp in df.columns and f"{s}_Current_Per_Speed" not in df.columns:
+            df[f"{s}_Current_Per_Speed"] = df[cs] / (df[sp] + 1e-5)
+
+    out_dir = Path(args.output) if args.output else Path("result/diagnostics") / group
+    out_dir.mkdir(parents=True, exist_ok=True)
+    surfaces = [surface] if surface else ["Top", "Bot"]
+
+    if args.sub in ("residual", "drift"):
+        # 先加载线上模型拿到预测残差
+        import joblib
+        try:
+            import coating_model_by_group  # noqa
+        except Exception:
+            pass
+        from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
+
+        from tin_coating.config import load_config
+        # paths.online_jobs 已经是带组名后缀的目录，不要再 / group
+        online_dir = load_config().resolve("paths.online_jobs")
+
+        for s in surfaces:
+            feat_cols = get_feature_cols(s)
+            model_path = online_dir / f"{s}_model.joblib"
+            online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{s.upper()}_Avg"
+            if not model_path.exists() or online_col not in df.columns:
+                print(f"[{args.sub}] {s}: model or online_col missing, skip")
+                continue
+            try:
+                m = joblib.load(model_path)
+            except Exception as e:
+                print(f"[{args.sub}] {s}: model load failed ({e}); try regenerate with same env, skip")
+                continue
+            sub_df = df.dropna(subset=feat_cols + [online_col]).copy()
+            if len(sub_df) < 60:
+                print(f"[{args.sub}] {s}: n={len(sub_df)} too small, skip")
+                continue
+            pred, _ = m.predict_smooth(sub_df[feat_cols], sub_df[online_col])
+            residuals = pred.values - sub_df[online_col].values
+
+            if args.sub == "residual":
+                from tin_coating.diagnostics.residual import run_full_residual_diagnostics
+                # 构造 train/test（按时间 80/20 切，不要打乱）
+                n = len(sub_df)
+                split = int(n * 0.8)
+                X = sub_df[feat_cols]
+                y_actual = sub_df[online_col].values
+                # 这里的 "pred" 就是模型校正后输出；残差 = 校正后 - Online
+                pred_full = pred.values
+                # 诊断需要 "y_true - pred" 形式的残差；我们分析的是模型校正输出相对于 online 基线的偏差
+                # 把 y_true 换成 online_actual，pred 换成模型校正后 → residual = actual - corrected
+                online = sub_df[online_col].values
+                corrected = pred_full
+                diag = run_full_residual_diagnostics(
+                    y_true_train=online[:split], y_true_test=online[split:],
+                    pred_train=corrected[:split], pred_test=corrected[split:],
+                    X_train=X.iloc[:split], X_test=X.iloc[split:],
+                    label=f"{s}表面",
+                    save_dir=str(out_dir / s / "residual"),
+                    tag=s, run_temporal=True, run_explainability=True,
+                )
+                print(f"[residual] {s}: feature_significance top=\n",
+                      diag['feature_significance'].head(8).to_string(index=False))
+            else:
+                from tin_coating.diagnostics.drift import ks_test_drift
+                import numpy as np
+                ks_stat, ks_p, mean_diff, verdict = ks_test_drift(residuals, min_samples=30)
+                print(f"[drift] {s}: KS={ks_stat:.4f} p={ks_p:.4g} mean_diff={mean_diff:.4f} verdict={verdict}")
+                (out_dir / s).mkdir(parents=True, exist_ok=True)
+                (out_dir / s / "drift_summary.txt").write_text(
+                    f"group={group}\nsurface={s}\nn={len(residuals)}\n"
+                    f"ks_stat={ks_stat}\nks_p={ks_p}\nmean_diff_post_minus_pre={mean_diff}\nverdict={verdict}\n",
+                    encoding="utf-8"
+                )
+        return 0
+
+    if args.sub == "interpret":
+        # 需要训练数据 + 模型 + y_delta；调用 ModelInterpreter
+        import joblib
+        from tin_coating.config import load_config
+        # paths.online_jobs 已经是带组名后缀的目录
+        online_dir = load_config().resolve("paths.online_jobs")
+        for s in surfaces:
+            feat_cols = get_feature_cols(s)
+            model_path = online_dir / f"{s}_model.joblib"
+            online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{s.upper()}_Avg"
+            cn = "上" if s == "Top" else "下"
+            lab_col = f"{cn}表面镀层重量A(XA1_0)"
+            required = feat_cols + [online_col, lab_col]
+            missing = [c for c in required if c not in df.columns]
+            if missing or not model_path.exists():
+                print(f"[interpret] {s}: missing={missing} or model absent, skip")
+                continue
+            try:
+                model = joblib.load(model_path)
+            except Exception as e:
+                print(f"[interpret] {s}: model load failed ({e}), skip")
+                continue
+            sub_df = df.dropna(subset=required)
+            if len(sub_df) < 80:
+                print(f"[interpret] {s}: n={len(sub_df)} too small, skip")
+                continue
+            X = sub_df[feat_cols]
+            y_delta = sub_df[lab_col] - sub_df[online_col]
+            try:
+                import coating_model_by_group  # noqa
+                from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
+                from tin_coating.eda.interpreter import ModelInterpreter
+                interpreter = ModelInterpreter(
+                    model=model, X=X, feature_names=feat_cols,
+                    save_dir=str(out_dir / s / "interpretation"),
+                )
+                interpreter.full_analysis(y=y_delta, run_permutation=True,
+                                          run_shap=True, run_pdp=True)
+            except ImportError as e:
+                print(f"[interpret] {s}: {e}（可能缺 shap/statsmodels），"
+                      f"跳过 SHAP/PDP 但保留 permutation importance")
+                try:
+                    interpreter = ModelInterpreter(
+                        model=model, X=X, feature_names=feat_cols,
+                        save_dir=str(out_dir / s / "interpretation"),
+                    )
+                    interpreter.permutation_importance(y=y_delta)
+                except Exception as e2:
+                    print(f"[interpret] {s}: still failed → {e2}")
+            except Exception as e:
+                print(f"[interpret] {s}: {type(e).__name__}: {e}")
+        print(f"[diagnose] saved → {out_dir}")
+        return 0
+
+    print(f"unknown diagnose sub-command: {args.sub}")
+    return 1
+
+
 def cmd_serve(args):
     """启动 7x24 在线推理服务。"""
     from tin_coating.service.server import serve
@@ -212,6 +419,26 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--model-dir", default=None)
     pr.set_defaults(func=cmd_predict)
 
+    # --- eda ---
+    ed = sub.add_parser("eda", help="EDA 数据分析：dist|corr|surface")
+    ed.add_argument("sub", choices=["dist", "corr", "surface"],
+                    help="dist=描述统计; corr=相关性+MI+DCOR; surface=分组 EDA 诊断")
+    ed.add_argument("--data", default=None)
+    ed.add_argument("--group", default=_CFG.app.default_group)
+    ed.add_argument("--surface", default=None)
+    ed.add_argument("--output", default=None, help="输出目录（默认 result/eda/<group>）")
+    ed.set_defaults(func=cmd_eda)
+
+    # --- diagnose ---
+    dg = sub.add_parser("diagnose", help="模型诊断：residual|drift|interpret")
+    dg.add_argument("sub", choices=["residual", "drift", "interpret"],
+                    help="residual=分布+QQ+ACF; drift=KS 漂移; interpret=SHAP+Permutation+PDP")
+    dg.add_argument("--data", default=None)
+    dg.add_argument("--group", default=_CFG.app.default_group)
+    dg.add_argument("--surface", default=None)
+    dg.add_argument("--output", default=None, help="输出目录（默认 result/diagnostics/<group>）")
+    dg.set_defaults(func=cmd_diagnose)
+
     # --- serve ---
     s = sub.add_parser("serve", help="启动 7x24 在线推理服务（/healthz /readyz /predict /metrics）")
     s.add_argument("--host", default=None)
@@ -222,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --- ops ---
     o = sub.add_parser("ops", help="无人值守运维：run / selfcheck")
     o.add_argument("op", choices=["run", "selfcheck"])
-    o.add_argument("--job", default=None, choices=["quality", "health", "retrain"])
+    o.add_argument("--job", default=None, choices=["quality", "health", "retrain", "drift", "report"])
     o.add_argument("--data", default=None)
     o.add_argument("--group", default=None)
     o.add_argument("--force", action="store_true")

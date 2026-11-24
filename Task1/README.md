@@ -2,6 +2,8 @@
 
 镀锌线 Top / Bot 表面镀层重量偏差校正模型。基于 **HistGradientBoosting + 残差校正 + EWMA 平滑**，按规格组训练，Walk-Forward CV 验证。
 
+**单一来源架构**：所有生产代码统一 import `tin_coating/` 子包，不再存在根目录旧脚本。训练、CV、重训、服务、运维入口全部通过 `cli/main.py` 或 `tin_coating.*` 直接调用；已从根目录删除的 15+ legacy 文件（`coating_model_by_group.py`、`legacy_*.py`、`model_persistence.py`、`archived/`、`surface_independent_modeling/` 等）里的逻辑已经物理搬入 `tin_coating/` 各子模块。
+
 当前生产配置（`Top2.799_Bot2.799` 规格组，2813 样本）：
 
 | 表面 | damping | pos_boost | lr    | depth | max_iter | Walk-Forward CV RMSE |
@@ -50,7 +52,7 @@ python monitoring/gate.py --rollback Top2.799_Bot2.799 Top --yes   # 回滚
 
 ```mermaid
 flowchart LR
-    A["featured_data.xlsx"] --> B["cli/main.py train"]
+    A["Excel 特征数据"] --> B["cli/main.py train"]
     B --> C["Walk-Forward CV"]
     B --> D["result/trained_models/{group}/{Top,Bot}_model.joblib"]
     D --> E["cli/main.py monitor quality"]
@@ -65,7 +67,7 @@ flowchart LR
     L --> M["registry.json active 标记切换 + 归档旧线上产物"]
     M --> J
     J --> N["/predict /healthz /readyz /metrics"]
-    
+
     style A fill:#eee
     style D fill:#eee
     style K fill:#fff
@@ -84,6 +86,12 @@ pip install -r requirements.txt          # 锁定 sklearn<1.5 / pandas<2.2（推
 
 依赖：numpy / pandas / scikit-learn / matplotlib / seaborn / openpyxl / optuna / joblib / pyyaml。Python 3.9–3.11。
 
+> ⚠️ **多环境 sklearn 反序列化坑**：registry 里的归档模型是用某个特定 sklearn 版本训练出来的。如果你换了 Python 环境（`.venv` vs anaconda），另一个环境的 sklearn 可能读不了旧模型，报错 `Can't get attribute '__pyx_unpickle_CyAbsoluteError'`。
+>
+> 此时 `ModelStore` 会自动退回 live 目录那份最新训练/部署的文件，**服务继续工作**但 `/version` 里标记 `fallback: true`、日志打 WARN。
+>
+> 消除 fallback：**同一环境训练 + gate --approve**；或者所有运行环境统一 `pip install -r requirements.txt`。
+
 ---
 
 ## Quick Path
@@ -101,14 +109,6 @@ python run_full_flow.py --rows 1000 --output result/predictions/my.xlsx
 每个阶段打印耗时 ✅/❌，最后汇总表；推理结果写到 `result/predictions/full_flow_<时间戳>.xlsx`（新增 `{Top,Bot}_Online_plus_correction` 和 `{Top,Bot}_Correction_Delta` 两列）。
 
 **退出码**：`0` 正常 / `1` 非致命告警 / `2` 致命失败。
-
-> ⚠️ **多环境 sklearn 反序列化坑**：registry 里的归档模型是用某个特定 sklearn 版本训练出来的。如果你换了 Python 环境（`.venv` vs anaconda），另一个环境的 sklearn 可能读不了旧模型，报错 `Can't get attribute '__pyx_unpickle_CyAbsoluteError'`。
-> 
-> 此时 `ModelStore` 会自动退回 `result/trained_models/by_group/.../{Top,Bot}_model.joblib` 这份最近一次训练/部署的文件，**服务继续工作**但 `/version` 里标记 `fallback: true`、日志打 WARN。
-> 
-> 要消除 fallback：**同一环境训练 + gate --approve**；或者所有运行环境统一 `pip install -r requirements.txt`。
-
----
 
 ### Path B：起 7×24 在线服务
 
@@ -143,8 +143,6 @@ python cli/main.py serve --host 0.0.0.0 --port 8080
 
 内部自动构造 `{Top,Bot}_Current_Per_Speed` 衍生列，所以不用上游算好传进来。
 
----
-
 ### Path C：管理模型版本
 
 ```bash
@@ -171,31 +169,34 @@ gate 审批时会**归档旧线上产物**到 `result/trained_models/.../_archiv
 
 ```
 Task1/
-├── tin_coating/               # pip install 后的主包
+├── tin_coating/               # pip install 后的主包 — 所有生产逻辑
+│   ├── config.py              #   统一配置加载器（点号访问 + 插值 + env 覆盖）
 │   ├── data/                  #   清洗 / 特征工程 / 格式转换 / 合并
 │   ├── modeling/              #   核心模型 / Walk-Forward CV / 持久化 / 调参
-│   ├── inference/             #   PredictionPipeline 批量推理
-│   ├── eda/                   #   探索性分析
+│   ├── inference/pipeline.py  #   PredictionPipeline 批量推理
+│   ├── eda/                   #   探索性分析 + 分组诊断 + 解释器（Permutation/SHAP/PDP）
 │   ├── diagnostics/           #   残差 / 漂移诊断
 │   ├── ops/  ★                #   7×24 运维底座：结构化日志 / Prometheus 指标 / 跨平台 FileLock / 告警 / 自检 / 调度器
 │   └── service/ ★             #   在线 HTTP 服务：/healthz /readyz /metrics /predict /version /reload
-├── docs/                      #   CODEMAP.md — 新旧代码边界 + 完整结构说明
+├── docs/CODEMAP.md            #   完整子模块文档
 ├── cli/main.py                # 统一 CLI 入口（argparse，零外部依赖）
-├── run_full_flow.py           # 一键全流程脚本
-├── monitoring/                # 监控闭环脚本（见下表）
-├── configs/                   # YAML 主配置 + 环境切换（app.yaml 是生产配置镜像）
+├── run_full_flow.py           # 一键全流程编排脚本
+├── monitoring/                # 监控闭环脚本（registry / gate / 质量门 / 健康检查 / 自动重训）
+├── configs/                   # YAML 主配置 + 环境切换
+│   ├── app.yaml               #   生产配置镜像（paths / service / ops / monitoring）
+│   ├── default.yaml
+│   ├── model/                 #   训练超参（每个规格组一个 JSON）
+│   └── optuna/                #   Optuna 搜索的配置（可选）
 ├── pyproject.toml             # pip install -e . + tin-coating console_scripts
+├── requirements.txt
 ├── pytest.ini / tests/        # 31 项 pytest
 ├── Dockerfile / docker-compose.yml / .dockerignore
 ├── .github/workflows/ci.yml   # push 时跑 pytest
-├── coating_model_by_group.py  # 原生产训练入口（零副作用，承诺一行未改）
-├── group_params_2_799_only.json  # 生产超参（不动）
-├── legacy_*.py                # 原根目录脚本改名前缀保留（feature_engineering / predict_by_group 等）
-├── archived/                  # 历史脚本归档
-└── requirements.txt
+├── group_params_2_799_only.json   # 生产超参（等价于 configs/model/ 下那份）
+├── config.yaml                # merge.py 主副表合并脚本的主配置（data/merge.py 自引用）
+├── rename_patch.yaml          # merge.py 列名更正补丁（data/merge.py 自引用）
+└── README.md
 ```
-
-> 原 `predict_by_group.py` / `model_inference.py` / `feature_engineering.py` / `residual_diagnostics.py` 已不在根目录（改为 `legacy_` 前缀或进 `archived/`）。日常使用请走 `tin_coating/*` 子包或 `cli/main.py`。
 
 ### 运行时持久状态（要备份）
 
@@ -204,6 +205,7 @@ Task1/
 | `monitoring/registry.json` | 版本历史：各规格组 + 表面的版本、指标、active 标记、`previous_active` 指针、`deployed_path` |
 | `result/trained_models/by_group/{group}/` | 每个规格组的在线产物：`{Top,Bot}_model.joblib` + `{Top,Bot}_metadata.json` |
 | `result/trained_models/.../_archive/` | 归档的历史线上模型（`{surface}_{version}.joblib`）|
+| `result/trained_models/.../.pending/` | 未审批的重训候选模型 |
 
 ### 运行时临时文件（可删、会自动清理）
 
@@ -225,7 +227,7 @@ Task1/
 python cli/main.py --help
 
 # ── 训练 / 验证 ──
-python cli/main.py train                         # 按 prod_config 跑正式训练
+python cli/main.py train                         # 按 prod_config 跑正式训练（产物落盘 result/trained_models/）
 python cli/main.py cv  --group Top2.799_Bot2.799 --surface Top   # Walk-Forward CV
 
 # ── 推理 ──
@@ -393,7 +395,7 @@ python __main_smoke_test.py
 
 | 文件 | 覆盖范围 |
 |---|---|
-| `tests/test_smoke.py` | 9 项：所有子包可 import、原入口零副作用、Walk-Forward CV RMSE 范围、CLI cv/quality、目录布局、单向依赖闭环（run_full_flow.py 作为编排脚本豁免 leak import 检查）|
+| `tests/test_smoke.py` | 9 项：所有子包可 import、modeling 子包完整导出、Walk-Forward CV RMSE 范围、CLI cv/quality、目录布局、服务不重复定义 ResidualCorrectionModel、import 边界 |
 | `tests/test_ops.py` | 结构化日志 JSON、Prometheus 指标渲染、`FileLock` 互斥、`Notifier` 文件通道、**`registry.json` 6 线程 × 5 次并发写不丢数据**、`run_selfcheck`、env override dotted key 隔离 meta env var |
 | `tests/test_service.py` | 契约反例（缺列 / 空数组 / 非数值）+ **真实起服务**（随机端口 ThreadingHTTPServer）跑：`/healthz`、`/readyz`、`/metrics`、`/version`、`/predict` happy / both / 400 / 404、**并发 16 请求**、`ModelStore` 热加载（mtime 变化即重载）、**fallback 降级**（primary artifact 损坏但 live 目录可用 → ready=True）、**全部不可用时 ready=False**、API Key |
 
@@ -405,10 +407,10 @@ python __main_smoke_test.py
 
 | # | 约束 | 原因 |
 |---|---|---|
-| 1 | **生产入口零副作用** —— `coating_model_by_group.py` 可以独立 import 和 `python coating_model_by_group.py` 运行，导出的函数/类/常量签名不变 | 这是原生产脚本，承诺**一行未改**；所有新代码必须单向依赖它 |
-| 2 | **单向依赖** —— 新代码 `tin_coating/*` / `cli/*` / `monitoring/*` 可以 import 顶层旧代码，但旧代码永不 import 新代码；`__main_smoke_test.py` 的"原顶层 .py 无 tin_coating/cli/monitoring import"检查保证这一点 | 避免旧脚本被新包"感染"；保持独立可跑 |
-| 3 | **规格组过滤** —— `Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min` `.round(3) == 2.799`（Bot 同理）| 生产超参锁死；改这里等于换了生产模型的训练样本空间 |
-| 4 | **Lab 列名是中文** —— `上表面镀层重量A(XA1_0)` / `下表面镀层重量A(XA1_0)`，不是英文 `Top*` / `Bot*` | 上游 Excel 产线导出的列名；硬编码在 `group_params_2_799_only.json` 和 monitoring 脚本里 |
+| 1 | **所有生产代码 import 单一来源** — `tin_coating.*` / `monitoring.*` / `cli.main` | 2026-11 重构后旧脚本全部删除；任何顶层 .py 残留都应该是数据处理辅助脚本（如 `config.yaml` / `merge.py` 主副表合并） |
+| 2 | **规格组过滤** — `Tin Weight_Setpoints[g/m2]_GALV_WEIGHT_TOP_Min` `.round(3) == 2.799`（Bot 同理）| 生产超参锁死；改这里等于换了生产模型的训练样本空间 |
+| 3 | **Lab 列名是中文** — `上表面镀层重量A(XA1_0)` / `下表面镀层重量A(XA1_0)`，不是英文 `Top*` / `Bot*` | 上游 Excel 产线导出的列名；硬编码在监控脚本里 |
+| 4 | **训练 ≠ 部署** — `train` / `run_full_flow.py` / `retrain` 只写 joblib + 进 pending，不碰 registry active 标记 | 必须走 `gate.py --approve` 才上线；回滚指针 `previous_active` 保证精确回到最近一次真正上线的版本 |
 
 ---
 
@@ -424,7 +426,7 @@ A：同一 job 上一轮还没结束，文件锁 `job_retrain.lock` 没释放（
 A：Top 或 Bot 其中一个模型加载失败。先看 `/version` 里哪一面没 loaded、是不是 `fallback=false` 但 `path` 不存在；再看 `monitoring/logs/service.jsonl` 里 `model_load_failed` 那条的具体 err；再手动 `python monitoring/gate.py --list` 确认 registry.json 的 active 版本是否在、路径是否对。
 
 **Q：我想换一个规格组（不是 `2.799`）训练和部署？**  
-A：改 `group_params_2_799_only.json` 的 `target_groups` 数组，然后 `cli/main.py train --config` 指定新的 JSON。CV 和质量门会按你传的 group 过滤。目前 pipeline 的 `default_group` 在 `configs/app.yaml`，可以改；多规格组矩阵跑法没做，要自己跑多次。
+A：改 `configs/model/group_params_2_799_only.json`（或新建 JSON 然后 `cli/main.py train --config xxx.json`）里的 `target_groups` 数组，或者改 `app.yaml` 里的 `app.default_group`。CV 和质量门会按你传的 group 过滤。目前 pipeline 的 `default_group` 在 `configs/app.yaml`，可以改；多规格组矩阵跑法没做，要自己跑多次。
 
 **Q：Docker 里起服务，模型怎么传进去？**  
 A：`docker-compose.yml` 现在**没写卷挂载**。上生产前必须加上，把 `monitoring/registry.json`、`monitoring/logs/`、`result/trained_models/` 挂进容器的相应路径，否则每次容器重建模型和版本历史就丢了。

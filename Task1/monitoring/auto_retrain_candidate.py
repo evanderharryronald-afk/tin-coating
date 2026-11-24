@@ -41,8 +41,7 @@ if str(TASK1_ROOT) not in sys.path:
 from registry import ModelRegistry  # noqa: E402
 import check_data_quality as dq    # noqa: E402
 from tin_coating.config import load_config  # noqa: E402
-
-import coating_model_by_group as cm  # noqa: E402
+from tin_coating.modeling.group_train import fit_and_evaluate_surface  # noqa: E402
 
 _CFG = load_config()
 
@@ -175,7 +174,7 @@ def run(featured_path: str | Path,
 
         # 2a. hold-out
         try:
-            corrector, holdout_metrics, _ = cm.fit_and_evaluate_surface(
+            corrector, holdout_metrics, _ = fit_and_evaluate_surface(
                 df, surface, params, group_tag=GROUP_LABEL,
                 train_ratio=0.65, val_ratio=0.20,
             )

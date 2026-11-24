@@ -24,12 +24,68 @@ _CFG = _load_cfg()
 
 
 def cmd_train(args):
-    """正式训练。"""
-    import subprocess
-    cfg = args.config or str(_CFG.resolve("paths.prod_config"))
-    print(f"[train] config={cfg}")
-    subprocess.run([sys.executable, str(_ROOT / "coating_model_by_group.py"),
-                    "--config", cfg], check=False)
+    """正式训练 — 调用 tin_coating.modeling.group_train.run_surface_pipeline。
+
+    产物落盘：result/trained_models/by_group/<group>/{Top,Bot}_model.joblib + metadata.json。
+    """
+    import pandas as pd
+    from tin_coating.modeling import load_pipeline_config, get_params_for_group
+    from tin_coating.modeling.group_train import run_surface_pipeline
+    from tin_coating.modeling.params import build_setpoint_group_key, get_feature_cols
+    from tin_coating.modeling.persistence import ModelSaver, ModelMetadata
+
+    cfg_path = args.config or str(_CFG.resolve("paths.prod_config"))
+    data_path = str(_CFG.resolve("paths.feature_data"))
+    target = _CFG.app.default_group
+    print(f"[train] config={cfg_path}  group={target}  data={data_path}")
+
+    pipeline_cfg = load_pipeline_config(cfg_path)
+    df = pd.read_excel(data_path)
+    df = build_setpoint_group_key(df)
+    group_df = df[df["Setpoint_Group_Label"] == target].copy()
+    if len(group_df) == 0:
+        print(f"[train] 过滤到 group={target} 后为空 — 检查数据")
+        return 2
+
+    # 确保衍生特征存在
+    for surface in ['Top', 'Bot']:
+        prefix = surface
+        speed_col = "Speed[m/min]_Process_Avg"
+        current_col = f"{prefix}_Current_Sum"
+        if current_col in group_df.columns and speed_col in group_df.columns:
+            if f"{prefix}_Current_Per_Speed" not in group_df.columns:
+                group_df[f"{prefix}_Current_Per_Speed"] = (
+                    group_df[current_col] / (group_df[speed_col] + 1e-5)
+                )
+
+    saver = ModelSaver(base_dir="result/trained_models", compress=True)
+    rc = 0
+    for surface in ["Top", "Bot"]:
+        try:
+            params = get_params_for_group(pipeline_cfg, target, surface)
+            model, metrics = run_surface_pipeline(
+                group_df, surface=surface, group_tag=target, group_params=params,
+                train_ratio=0.65, val_ratio=0.20,
+            )
+            rmse = metrics.get("RMSE_模型_测试")
+            n_train = int(metrics.get("训练样本数", 0))
+            feat_cols = get_feature_cols(surface)
+            meta = ModelMetadata(
+                model_type=model.__class__.__name__,
+                surface=surface,
+                feature_names=feat_cols,
+                hyperparameters=params,
+                group_label=target,
+                training_samples=n_train,
+                training_metrics=metrics,
+                source_script="cli.main:train",
+            )
+            info = saver.save_model(model, meta, surface=surface, group_label=target)
+            print(f"  ✅ {surface}: Test RMSE={rmse:.4f}  → {info['model_path']}")
+        except Exception as e:
+            print(f"  ❌ {surface}: 训练/保存失败 — {e}")
+            rc = 2
+    return rc
 
 
 def cmd_cv(args):
@@ -280,10 +336,6 @@ def cmd_diagnose(args):
 def _diag_model_based(df, group, surface, out_dir, sub):
     """diagnose residual / drift 共享内核：load model → predict → residual → analyse。"""
     import joblib
-    try:
-        import coating_model_by_group  # noqa
-    except Exception:
-        pass
     from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
     from tin_coating.modeling.params import get_feature_cols
     from tin_coating.config import load_config
@@ -345,11 +397,7 @@ def _diag_model_based(df, group, surface, out_dir, sub):
 def _diag_interpret(df, group, surface, out_dir):
     """diagnose interpret（Permutation + SHAP + PDP，SHAP 可选）。"""
     import joblib
-    try:
-        import coating_model_by_group  # noqa
-        from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
-    except Exception:
-        pass
+    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
     from tin_coating.modeling.params import get_feature_cols
     from tin_coating.config import load_config
 

@@ -136,17 +136,11 @@ def run_job(job: str, data: str | None = None, force: bool = False,
             import pandas as pd
             import joblib
             import numpy as np
+            from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
             from tin_coating.modeling.params import (
                 build_setpoint_group_key, get_feature_cols,
             )
             from tin_coating.diagnostics.drift import ks_test_drift
-
-            try:
-                # 向后兼容：尝试注册旧 __main__ 下的 ResidualCorrectionModel
-                import coating_model_by_group  # noqa
-                from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
-            except Exception:
-                pass
 
             g = group_label or str(cfg.app.default_group)
             df = pd.read_excel(feature_data)
@@ -212,13 +206,9 @@ def run_job(job: str, data: str | None = None, force: bool = False,
                 # drift 复跑一遍；不想重复算可以在 quality/health 报告里先写临时文件
                 import pandas as pd
                 import joblib
+                from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
                 from tin_coating.modeling.params import build_setpoint_group_key, get_feature_cols
                 from tin_coating.diagnostics.drift import ks_test_drift
-                try:
-                    import coating_model_by_group  # noqa
-                    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa
-                except Exception:
-                    pass
                 df = pd.read_excel(feature_data)
                 df = build_setpoint_group_key(df)
                 df = df[df["Setpoint_Group_Label"] == g].copy()

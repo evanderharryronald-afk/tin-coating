@@ -494,8 +494,8 @@ class SurfaceCorrelationAnalyzer:
 
 
 if __name__ == "__main__":
-    # 延迟导入，避免与 coating_model_by_group 循环引用
-    from coating_model_by_group import (
+    # 延迟导入，避免与其他子模块循环引用
+    from tin_coating.modeling.params import (
         build_setpoint_group_key,
         summarize_setpoint_groups,
         MIN_GROUP_SAMPLES,

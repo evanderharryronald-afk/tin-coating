@@ -37,8 +37,9 @@ if str(TASK1_ROOT) not in sys.path:
     sys.path.insert(0, str(TASK1_ROOT))
 
 # 复用生产链路里的现成逻辑
-from model_persistence import load_model  # noqa: E402
 from tin_coating.config import load_config  # noqa: E402
+from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: E402
+from tin_coating.modeling.params import get_feature_cols, build_corrector_instance  # noqa: E402
 
 _CFG = load_config()
 
@@ -68,15 +69,15 @@ def _try_load_model(surface: str, group_label: str, train_df: pd.DataFrame | Non
     优先按路径找 joblib；如果 numpy 版本漂移、pickle 反序列化失败，
     就用同样的超参重新训练一个等价模型（训练数据 / 超参必须与线上一致）。
 
-    线上超参来源：group_params_2_799_only.json（alpha_smoothing + HGB 超参）。
+    ResidualCorrectionModel 的类级 __module__ 已强制为 tin_coating.modeling.residual_model，
+    历史上存为 __main__ 的旧 joblib 也可通过 residual_model.py 末尾的 sys.modules["__main__"]
+    回注册兜底，因此不再需要 import coating_model_by_group 的 hack。
     """
-    import coating_model_by_group as cm  # noqa: F401  # 确保类能从任何路径被 joblib 反序列化
-    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # noqa: F401
+    import joblib
 
     primary = _default_jobs_dir(group_label) / f"{surface}_model.joblib"
     if primary.exists():
         try:
-            import joblib
             return joblib.load(primary), True  # (model, loaded_from_joblib)
         except Exception as e:
             print(f"  [load_model] joblib 加载失败 ({e.__class__.__name__})，"
@@ -86,18 +87,13 @@ def _try_load_model(surface: str, group_label: str, train_df: pd.DataFrame | Non
     if train_df is None or hyperparams is None:
         raise RuntimeError(
             f"{surface} joblib 不存在且未提供重训所需的 train_df + hyperparams，无法回退。"
-            f"请先跑一遍 coating_model_by_group.py 产出 joblib，或者在调用 run() 时传入 train_df"
+            f"请先跑一遍训练产出 joblib，或者在调用 run() 时传入 train_df"
         )
     return _retrain_equivalent(surface, train_df, hyperparams), False
 
 
 def _retrain_equivalent(surface: str, df: pd.DataFrame, params: dict):
-    """用与线上完全相同的特征 + 超参，在给定 df 上重新训练 ResidualCorrectionModel。
-
-    复用 coating_model_by_group.fit_and_evaluate_surface 内的特征构造逻辑，
-    只做 train_ratio=1.0 的"全量训练"。
-    """
-    import coating_model_by_group as cm
+    """用与线上完全相同的特征 + 超参，在给定 df 上重新训练 ResidualCorrectionModel。"""
     prefix = surface
     speed_col = "Speed[m/min]_Process_Avg"
     online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg"
@@ -106,41 +102,12 @@ def _retrain_equivalent(surface: str, df: pd.DataFrame, params: dict):
     df = df.copy()
     df[f"{prefix}_Current_Per_Speed"] = df[current_col] / (df[speed_col] + 1e-5)
 
-    feature_cols = [
-        online_col, current_col,
-        f"{prefix}_Current_Per_Speed",
-        f"{prefix}_Theoretical_Factor",
-        speed_col,
-        "Dimension_[mm]_Width",
-        "Dimension_[mm]_Thickness",
-        "Steel_Grade_Encoded",
-    ]
+    feature_cols = get_feature_cols(surface)
     X = df[feature_cols]
     y_delta = df[f"{prefix}_Delta"]
-    corrector = cm._build_corrector_instance(params, cm.ResidualCorrectionModel)
+    corrector = build_corrector_instance(params, ResidualCorrectionModel)
     corrector.fit(X, y_delta)
     return corrector
-
-
-def _build_features(df: pd.DataFrame, surface: str) -> pd.DataFrame:
-    """与 coating_model_by_group.fit_and_evaluate_surface 中的特征逻辑保持一致。"""
-    prefix = surface
-    speed_col = "Speed[m/min]_Process_Avg"
-    online_col = f"Tin Weight_Actual[g/m2]_GALV_WEIGHT_{prefix.upper()}_Avg"
-    current_col = f"{prefix}_Current_Sum"
-
-    df = df.copy()
-    df[f"{prefix}_Current_Per_Speed"] = df[current_col] / (df[speed_col] + 1e-5)
-
-    return df[[
-        online_col, current_col,
-        f"{prefix}_Current_Per_Speed",
-        f"{prefix}_Theoretical_Factor",
-        speed_col,
-        "Dimension_[mm]_Width",
-        "Dimension_[mm]_Thickness",
-        "Steel_Grade_Encoded",
-    ]]
 
 
 def _metrics(actual: np.ndarray, pred: np.ndarray) -> dict:
@@ -257,7 +224,12 @@ def run(featured_path: str | Path | None = None, group_label: str | None = None,
             summary["overall_verdict"] = "WARN"
             continue
 
-        X = _build_features(df, surface)
+        # 确保有 Current_Per_Speed 衍生列
+        cs, sp = f"{prefix}_Current_Sum", "Speed[m/min]_Process_Avg"
+        if cs in df.columns and sp in df.columns and f"{prefix}_Current_Per_Speed" not in df.columns:
+            df[f"{prefix}_Current_Per_Speed"] = df[cs] / (df[sp] + 1e-5)
+
+        X = df[get_feature_cols(surface)]
         actual = df[online_col]
         y_true = df[lab_col] if lab_col != "__derived__" else df["__derived__"]
 

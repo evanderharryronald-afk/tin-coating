@@ -74,15 +74,40 @@ def stage_selfcheck(group: str) -> str:
 
 @_stage("正式训练")
 def stage_train(group: str) -> str:
-    import subprocess
+    import pandas as pd
 
     cfg = _cfg()
-    cmd = [sys.executable, str(ROOT / "coating_model_by_group.py"),
-           "--config", str(cfg.resolve("paths.prod_config"))]
-    print("  " + " ".join(cmd))
-    r = subprocess.run(cmd, cwd=str(ROOT))
-    if r.returncode != 0:
-        raise RuntimeError(f"训练脚本退出码 {r.returncode}")
+    cfg_path = str(cfg.resolve("paths.prod_config"))
+    data_path = str(cfg.resolve("paths.feature_data"))
+    print(f"  config={cfg_path}")
+
+    from tin_coating.modeling import load_pipeline_config, get_params_for_group
+    from tin_coating.modeling.group_train import run_surface_pipeline
+    from tin_coating.modeling.params import build_setpoint_group_key, get_feature_cols
+    from tin_coating.modeling.persistence import ModelSaver, ModelMetadata
+
+    pipeline_cfg = load_pipeline_config(cfg_path)
+    df = pd.read_excel(data_path)
+    df = build_setpoint_group_key(df)
+    group_df = df[df["Setpoint_Group_Label"] == group].copy()
+    if len(group_df) == 0:
+        raise RuntimeError(f"group={group} 过滤后为空")
+
+    saver = ModelSaver(base_dir="result/trained_models", compress=True)
+    for surface in ["Top", "Bot"]:
+        params = get_params_for_group(pipeline_cfg, group, surface)
+        model, metrics = run_surface_pipeline(
+            group_df, surface=surface, group_tag=group, group_params=params,
+            train_ratio=0.65, val_ratio=0.20,
+        )
+        meta = ModelMetadata(
+            model_type=model.__class__.__name__, surface=surface,
+            feature_names=get_feature_cols(surface), hyperparameters=params,
+            group_label=group, training_samples=int(metrics.get("训练样本数", 0)),
+            training_metrics=metrics, source_script="run_full_flow",
+        )
+        saver.save_model(model, meta, surface=surface, group_label=group)
+
     model_dir = cfg.resolve("paths.online_jobs")
     return f"模型目录 {model_dir}"
 

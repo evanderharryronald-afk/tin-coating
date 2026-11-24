@@ -33,6 +33,7 @@ from .params import (
     get_feature_cols,
 )
 from .walk_forward_cv import run_cv_for_surface
+from .group_train import fit_and_evaluate_surface, run_surface_pipeline
 
 __all__ = [
     "ResidualCorrectionModel", "LinearResidualCorrectionModel",
@@ -41,4 +42,5 @@ __all__ = [
     "load_pipeline_config", "get_params_for_group", "build_corrector_instance",
     "build_setpoint_group_key", "summarize_setpoint_groups", "get_feature_cols",
     "run_cv_for_surface",
+    "fit_and_evaluate_surface", "run_surface_pipeline",
 ]

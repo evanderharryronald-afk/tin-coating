@@ -10,9 +10,8 @@ from optuna.visualization import (
 )
 from sklearn.model_selection import TimeSeriesSplit
 
-from coating_model_by_group import (
-    build_setpoint_group_key, fit_and_evaluate_surface
-)
+from tin_coating.modeling.params import build_setpoint_group_key
+from tin_coating.modeling.group_train import fit_and_evaluate_surface
 
 # 基础结果目录
 BASE_RESULT_DIR = "result/tuning"

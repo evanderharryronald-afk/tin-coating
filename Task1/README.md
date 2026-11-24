@@ -205,7 +205,6 @@ Task1/
 ├── requirements.txt
 ├── pytest.ini / tests/        # 31 项 pytest
 ├── Dockerfile / docker-compose.yml / .dockerignore
-├── .github/workflows/ci.yml   # push 时跑 pytest
 ├── group_params_2_799_only.json   # 生产超参（等价于 configs/model/ 下那份）
 ├── config.yaml                # merge.py 主副表合并脚本的主配置（data/merge.py 自引用）
 ├── rename_patch.yaml          # merge.py 列名更正补丁（data/merge.py 自引用）
@@ -393,7 +392,7 @@ curl http://localhost:8080/readyz
 docker compose logs -f tin-coating
 ```
 
-> ⚠️ **Dockerfile / docker-compose.yml / .dockerignore / .github/workflows/ci.yml 都已经写好**，但还没在 CI 里真跑过 `docker build`，`docker-compose.yml` 也没写 `healthcheck:` 和 `restart: unless-stopped`。上生产前必须亲自 build → 起 → `curl /readyz` → kill → 看自动重启 → 再 `/readyz` 一次。
+> ⚠️ **Dockerfile / docker-compose.yml / .dockerignore 都已经写好**，但还没真跑过 `docker build`，`docker-compose.yml` 也没写 `healthcheck:` 和 `restart: unless-stopped`。上生产前必须亲自 build → 起 → `curl /readyz` → kill → 看自动重启 → 再 `/readyz` 一次。
 
 ---
 

@@ -99,16 +99,27 @@ pip install -r requirements.txt          # 锁定 sklearn<1.5 / pandas<2.2（推
 ### Path A：一键跑全链（推荐先跑这个）
 
 ```bash
-python run_full_flow.py                     # 自检 → 训练 → CV → 质量门 → 健康检查 → 推理
-python run_full_flow.py --quick             # 跳训练/CV，约 30 秒跑完检查 + 200 行推理
-python run_full_flow.py --skip-train        # 复用现有模型
-python run_full_flow.py --with-retrain      # 额外生成重训候选（只产 pending，不部署）
+python run_full_flow.py                 # 7 个 stage：自检 → 训练 → CV → EDA+诊断 → 质量门 → 健康检查 → 推理
+python run_full_flow.py --quick         # 跳训练/CV/EDA+诊断，仅跑 自检+质量+健康+推理（~30 秒）
+python run_full_flow.py --skip-train    # 复用现有模型，其余照跑
+python run_full_flow.py --skip-analytics  # 跳过 EDA/残差/漂移/解释性（~48s，省时间）
+python run_full_flow.py --with-retrain  # 额外生成重训候选（只产 pending，不部署）
 python run_full_flow.py --rows 1000 --output result/predictions/my.xlsx
 ```
 
-每个阶段打印耗时 ✅/❌，最后汇总表；推理结果写到 `result/predictions/full_flow_<时间戳>.xlsx`（新增 `{Top,Bot}_Online_plus_correction` 和 `{Top,Bot}_Correction_Delta` 两列）。
+**7 个 stage 真实落盘**（exit code 0 = 全通，每个阶段单独 try/except，EDA+诊断套件里单个子模块 fail 不中断主流程）：
 
-**退出码**：`0` 正常 / `1` 非致命告警 / `2` 致命失败。
+| Stage | 耗时 | 产物 |
+|---|---|---|
+| 启动自检 | < 1s | stdout 5 项 OK/WARN/FAIL |
+| 正式训练 | ~110s | `result/trained_models/by_group/<group>/{Top,Bot}_{model.joblib,metadata.json}` + `result/grouped_by_coating_weight/fitting_result/{fitting_result,residual_analysis,residual_train_vs_test}/` Top/Bot × 3 png + `.../interpretation/{group}_{Top,Bot}/{test_set,val_set}/` permutation + PDP（**permutation importance 真跑，不再阉割**）|
+| Walk-Forward CV | ~20s | `result/cv/<group>/cv_summary.json`（Top/Bot RMSE + MAE + folds 明细，**落盘**）|
+| EDA + 诊断套件 | ~48s | `result/eda/<group>/{Top,Bot}/` 每面 6 png（pearson + spearman + MI + MI matrix + DCOR + DCOR matrix，**corr 全开**）+ `.../pre|post/` surface 预诊断 + `result/diagnostics/<group>/{Top,Bot}/{residual,drift,interpretation}/` 每面残差 3 png + drift_summary.txt + permutation_importance.png + PDP |
+| 数据质量门 | ~8s | `monitoring/reports/data_quality_*.json` |
+| 月度健康检查 | ~8s | `monitoring/reports/monthly_health_*.json + .csv` |
+| 批量推理 | ~1s | `result/predictions/full_flow_<时间戳>.xlsx`（新增 `{Top,Bot}_Online_plus_correction` 和 `{Top,Bot}_Correction_Delta` 两列）|
+
+**EDA + 诊断套件 = 8 个子模块**：eda corr × Top + eda corr × Bot + eda surface + Top 残差/漂移/解释 + Bot 残差/漂移/解释。每个子模块独立 try/except，失败只 WARN 不中断主流程。可用 `--skip-analytics` 跳过。
 
 ### Path B：起 7×24 在线服务
 

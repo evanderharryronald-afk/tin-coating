@@ -211,7 +211,7 @@ def _rollback(reg: ModelRegistry, group_label: str, surface: str, yes: bool):
     print(f"\n✅ 已回滚: version={actual}")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="模型审批 Gate（只读默认；approve/rollback 需显式 --yes）")
     parser.add_argument("--list", action="store_true", help="列出所有规格组版本历史（默认动作）")
     parser.add_argument("--show", nargs=2, metavar=("GROUP", "SURFACE"),
@@ -225,7 +225,7 @@ def main():
     parser.add_argument("--reason", default=None,
                         help="本次部署/审批的理由（如 'walk-forward CV 改进'），会写入 registry")
     parser.add_argument("--yes", action="store_true", help="跳过二次确认直接执行")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     reg = ModelRegistry()
 

@@ -91,6 +91,8 @@ def cmd_train(args):
 def cmd_cv(args):
     """Walk-Forward 5-fold CV — 用子包独立模块。"""
     import pandas as pd
+    import json
+    from pathlib import Path
     from tin_coating.modeling import (
         load_pipeline_config, get_params_for_group,
         build_setpoint_group_key, run_cv_for_surface,
@@ -108,6 +110,10 @@ def cmd_cv(args):
     group_df = df[df['Setpoint_Group_Label'] == target].copy()
     print(f"[cv] group={target}  n={len(group_df)}  surfaces={surfaces}")
 
+    summary = {"group": target, "n": len(group_df), "surfaces": {}}
+    out_dir = Path(args.output) if args.output else Path("result/cv") / target
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     for surface in surfaces:
         params = get_params_for_group(cfg, target, surface)
         cv = run_cv_for_surface(group_df, surface, params)
@@ -117,6 +123,16 @@ def cmd_cv(args):
         print(f"  {surface}  CV RMSE={rmse:.4f} ± {std:.4f}  MAE={mae:.4f}  folds={cv['n_folds']}")
         for d in cv["folds_detail"]:
             print(f"    {d['fold']}: RMSE={d['rmse']:.4f}  n_test={d['test_samples']}")
+        summary["surfaces"][surface] = {
+            "cv_rmse_mean": float(rmse), "cv_rmse_std": float(std),
+            "cv_mae_mean": float(mae), "n_folds": cv["n_folds"],
+            "folds": cv["folds_detail"],
+        }
+
+    out_path = out_dir / "cv_summary.json"
+    out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[cv] saved → {out_path}")
+    return 0
 
 
 def cmd_predict(args):
@@ -194,23 +210,30 @@ def _run_monitor(subcmd: str, args):
         return 1
     elif subcmd == "list":
         import gate as g
-        g.main([sys.argv[0], "--list", "--surface", args.surface or ""])
+        argv = ["--list"]
+        if args.surface:
+            argv += ["--surface", args.surface]
+        g.main(argv)
         return 0
     elif subcmd == "approve":
         import gate as g
-        argv = ["--approve", "--surface", args.surface]
+        argv = ["--approve", "--group", args.group or _CFG.app.default_group,
+                "--surface", args.surface]
         if args.version:
             argv += ["--version", args.version]
+        if args.reason:
+            argv += ["--reason", args.reason]
         if args.yes:
             argv += ["--yes"]
-        g.main([sys.argv[0]] + argv)
+        g.main(argv)
         return 0
     elif subcmd == "rollback":
         import gate as g
-        argv = ["--rollback", "--surface", args.surface]
+        argv = ["--rollback", "--group", args.group or _CFG.app.default_group,
+                "--surface", args.surface]
         if args.yes:
             argv += ["--yes"]
-        g.main([sys.argv[0]] + argv)
+        g.main(argv)
         return 0
     else:
         print(f"unknown monitor sub-command: {subcmd}")
@@ -249,14 +272,14 @@ def cmd_eda(args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.sub == "corr":
-        from tin_coating.eda.analyzer import SurfaceCorrelationAnalyzer
+        from tin_coating.eda.correlation import SurfaceCorrelationAnalyzer
         ana = SurfaceCorrelationAnalyzer(default_save_dir=str(out_dir))
         surfaces = [surface] if surface else ["Top", "Bot"]
         for s in surfaces:
             print(f"\n== corr {s} ==")
             ana.analyze_surface(df, surface=s, save_dir=str(out_dir / s),
-                               corr_method="both", compute_mi=True, compute_dcor=False,
-                               compute_mi_matrix=False, compute_dcor_matrix=False)
+                               corr_method="both", compute_mi=True, compute_dcor=True,
+                               compute_mi_matrix=True, compute_dcor_matrix=True)
     elif args.sub == "surface":
         from tin_coating.eda.grouping import GroupEDADiagnoser
         surfaces = [surface] if surface else ["Top", "Bot"]
@@ -491,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--data", default=None)
     c.add_argument("--group", default=_CFG.app.default_group)
     c.add_argument("--surface", default=None, help="Top / Bot，不指定就两个都跑")
+    c.add_argument("--output", default=None, help="输出目录（默认 result/cv/<group>）")
     c.set_defaults(func=cmd_cv)
 
     # --- predict ---

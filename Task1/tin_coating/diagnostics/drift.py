@@ -75,6 +75,7 @@ def ks_and_mean_diff(y, ratio=0.8):
 
 def analyze_one(df, surface, group_label, save_dir):
     """对单个（组 + 表面）做完整分析，返回一行指标，并保存图"""
+    os.makedirs(save_dir, exist_ok=True)
     delta_col = get_delta_col(surface)
     if delta_col not in df.columns:
         return None

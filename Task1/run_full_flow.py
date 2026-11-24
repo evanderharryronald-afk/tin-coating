@@ -115,6 +115,7 @@ def stage_train(group: str) -> str:
 @_stage("Walk-Forward CV")
 def stage_cv(group: str) -> str:
     import pandas as pd
+    import json as _json
     from tin_coating.modeling import (
         build_setpoint_group_key, get_params_for_group,
         load_pipeline_config, run_cv_for_surface,
@@ -129,13 +130,152 @@ def stage_cv(group: str) -> str:
         raise ValueError(f"规格组 {group} 没有数据")
 
     parts = []
+    summary = {"group": group, "n": len(gdf), "surfaces": {}}
     for surface in ("Top", "Bot"):
         params = get_params_for_group(cfg_pipe, group, surface)
         cv = run_cv_for_surface(gdf, surface, params)
         parts.append(f"{surface} RMSE={cv['cv_rmse_mean']:.4f}±{cv['cv_rmse_std']:.4f}")
         print(f"  {surface}: CV RMSE={cv['cv_rmse_mean']:.4f} ± {cv['cv_rmse_std']:.4f} "
               f"MAE={cv['cv_mae_mean']:.4f} folds={cv['n_folds']}")
-    return " | ".join(parts)
+        summary["surfaces"][surface] = {
+            "cv_rmse_mean": float(cv["cv_rmse_mean"]),
+            "cv_rmse_std": float(cv["cv_rmse_std"]),
+            "cv_mae_mean": float(cv["cv_mae_mean"]),
+            "n_folds": cv["n_folds"],
+            "folds": cv["folds_detail"],
+        }
+
+    # 落盘 JSON（和 CLI cv 子命令一致）
+    cv_json = ROOT / "result" / "cv" / group / "cv_summary.json"
+    cv_json.parent.mkdir(parents=True, exist_ok=True)
+    cv_json.write_text(_json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return " | ".join(parts) + f"  → {cv_json}"
+
+
+# ----- EDA / Diagnose / Drift / Interp：非致命，fail 不中断主流程 -----
+def _eda_and_diagnostics(group: str) -> str:
+    """训练后 EDA + 诊断套件。每个子步骤 fail 单独 try/except，不中断主流程。"""
+    import pandas as pd, joblib, traceback as tb
+    from tin_coating.config import load_config
+    from tin_coating.modeling.params import (
+        build_setpoint_group_key, get_feature_cols,
+    )
+    from tin_coating.modeling.residual_model import ResidualCorrectionModel  # side-effect for pickle
+
+    cfg = load_config()
+    df = pd.read_excel(str(cfg.resolve("paths.feature_data")))
+    df = build_setpoint_group_key(df)
+    gdf = df[df["Setpoint_Group_Label"] == group].copy()
+    for s in ('Top', 'Bot'):
+        cs, sp = f'{s}_Current_Sum', 'Speed[m/min]_Process_Avg'
+        if cs in gdf.columns and sp in gdf.columns:
+            gdf[f'{s}_Current_Per_Speed'] = gdf[cs] / (gdf[sp] + 1e-5)
+
+    lab_map = {'Top': '上表面镀层重量A(XA1_0)', 'Bot': '下表面镀层重量A(XA1_0)'}
+    online_map = {'Top': 'Tin Weight_Actual[g/m2]_GALV_WEIGHT_TOP_Avg',
+                  'Bot': 'Tin Weight_Actual[g/m2]_GALV_WEIGHT_BOT_Avg'}
+
+    results: list[str] = []
+
+    def _safe(name: str, fn):
+        try:
+            fn()
+            print(f"  ✅ {name}")
+            results.append(name)
+        except Exception as e:
+            print(f"  ⚠️ {name} 跳过（非致命）— {type(e).__name__}: {e}")
+            tb.print_exc()
+            results.append(f"{name}(skip)")
+
+    # 1. EDA corr — 完整 pearson/spearman + MI + DCOR（每面 12 png）
+    def _corr():
+        from tin_coating.eda.correlation import SurfaceCorrelationAnalyzer
+        ana = SurfaceCorrelationAnalyzer(default_save_dir=str(
+            ROOT / "result" / "eda" / group))
+        for s in ('Top', 'Bot'):
+            sub = gdf.dropna(subset=get_feature_cols(s) + [lab_map[s]])
+            ana.analyze_surface(
+                sub, surface=s,
+                save_dir=str(ROOT / "result" / "eda" / group / s),
+                corr_method='both',
+                compute_mi=True, compute_dcor=True,
+                compute_mi_matrix=True, compute_dcor_matrix=True,
+            )
+    _safe('eda corr (Top+Bot × 12 png)', _corr)
+
+    # 2. EDA surface pre-diagnosis
+    def _surface():
+        from tin_coating.eda.grouping import GroupEDADiagnoser
+        d = GroupEDADiagnoser(surfaces=['Top', 'Bot'],
+                              pre_diagnosis_dir=str(ROOT / "result" / "eda" / group / "pre"),
+                              post_diagnosis_dir=str(ROOT / "result" / "eda" / group / "post"))
+        d.pre_modeling_diagnosis(gdf, group_label=group)
+    _safe('eda surface pre-diagnosis', _surface)
+
+    # 3. 残差诊断 + 漂移 + 解释性（每面各一份）
+    for s in ('Top', 'Bot'):
+        feat = get_feature_cols(s)
+        sub = gdf.dropna(subset=feat + [lab_map[s]]).copy()
+        if sub.empty:
+            print(f"  ⚠️ {s} 表面无有效数据，跳过诊断")
+            continue
+        model_path = ROOT / "result" / "trained_models" / "by_group" / group / f"{s}_model.joblib"
+        if not model_path.exists():
+            print(f"  ⚠️ {s}_model.joblib 不存在，跳过诊断")
+            continue
+        m = joblib.load(model_path)
+        online = sub[online_map[s]].values
+        lab = sub[lab_map[s]].values
+        sub[f'{s}_Delta'] = lab - online
+        model_out_dir = ROOT / "result" / "diagnostics" / group / s
+
+        def _residual():
+            from tin_coating.diagnostics.residual import run_full_residual_diagnostics
+            n = len(sub); split = int(n * 0.8)
+            pred, _ = m.predict_smooth(sub[feat], online)
+            run_full_residual_diagnostics(
+                y_true_train=online[:split], y_true_test=online[split:],
+                pred_train=pred.values[:split], pred_test=pred.values[split:],
+                X_train=sub[feat].iloc[:split], X_test=sub[feat].iloc[split:],
+                label=f"{group}/{s}表面",
+                save_dir=str(model_out_dir / "residual"),
+                tag=f"{group}_{s}", run_temporal=True, run_explainability=True,
+            )
+        _safe(f"diagnose residual ({s})", _residual)
+
+        def _drift():
+            from tin_coating.diagnostics.drift import ks_test_drift
+            residuals = lab - m.predict_smooth(sub[feat], online)[0].values
+            ks, p, md, verdict = ks_test_drift(residuals, ratio=0.8)
+            (model_out_dir / "drift").mkdir(parents=True, exist_ok=True)
+            (model_out_dir / "drift" / "drift_summary.txt").write_text(
+                f"group={group}\nsurface={s}\nn={len(residuals)}\n"
+                f"ks_stat={ks}\nks_p={p}\nmean_diff={md}\nverdict={verdict}\n",
+                encoding="utf-8",
+            )
+            print(f"    {s}: KS={ks:.4f} p={p:.4g} mean_diff={md:.4f} verdict={verdict}")
+        _safe(f"diagnose drift ({s})", _drift)
+
+        def _interp():
+            from tin_coating.eda.interpreter import ModelInterpreter
+            interp = ModelInterpreter(
+                model=m, X=sub[feat], feature_names=feat,
+                save_dir=str(model_out_dir / "interpretation"),
+                max_samples_for_shap=500,
+            )
+            interp.full_analysis(
+                y=sub[f'{s}_Delta'].values.astype(float),
+                run_permutation=True, run_shap=True, run_pdp=True,
+                pdp_features=feat[:5],
+            )
+        _safe(f"diagnose interpret ({s})", _interp)
+
+    return f"完成 {len(results)} 个子模块（失败不中断主流程）"
+
+
+@_stage("EDA + 诊断套件")
+def stage_analytics(group: str) -> str:
+    return _eda_and_diagnostics(group)
 
 
 @_stage("数据质量门")
@@ -222,9 +362,10 @@ def main() -> int:
     cfg = _cfg()
     p = argparse.ArgumentParser(description="tin-coating 全流程一键运行")
     p.add_argument("--group", default=cfg.app.default_group)
-    p.add_argument("--quick", action="store_true", help="跳过训练/CV，只跑自检+质量+健康+少量推理")
+    p.add_argument("--quick", action="store_true", help="跳过训练/CV/分析套件，只跑自检+质量+健康+少量推理")
     p.add_argument("--skip-train", action="store_true", help="复用已有模型，不重新训练")
     p.add_argument("--skip-cv", action="store_true", help="跳过 Walk-Forward CV")
+    p.add_argument("--skip-analytics", action="store_true", help="跳过 EDA + 残差/漂移/解释性分析（省时间）")
     p.add_argument("--with-retrain", action="store_true", help="额外生成重训候选（不部署）")
     p.add_argument("--rows", type=int, default=200, help="推理样本行数（默认 200）")
     p.add_argument("--output", default=None, help="推理输出 Excel 路径")
@@ -236,7 +377,8 @@ def main() -> int:
 
     t0 = time.time()
     print(f"[flow] group={args.group} quick={args.quick} "
-          f"train={'no' if (args.quick or args.skip_train) else 'yes'}")
+          f"train={'no' if (args.quick or args.skip_train) else 'yes'} "
+          f"analytics={'no' if (args.quick or args.skip_analytics) else 'yes'}")
 
     if not stage_selfcheck(args.group):
         return 2                                   # 自检失败直接停
@@ -247,6 +389,9 @@ def main() -> int:
 
     if not (args.quick or args.skip_cv):
         stage_cv(args.group)
+
+    if not (args.quick or args.skip_analytics):
+        stage_analytics(args.group)                # EDA + 残差/漂移/解释性（非致命）
 
     stage_quality(args.group)
     stage_health(args.group)
@@ -260,7 +405,7 @@ def main() -> int:
     # ---- 汇总 ----
     print(f"\n{'=' * 70}\n[flow] 汇总（总耗时 {round(time.time() - t0, 2)}s）\n{'=' * 70}")
     for s in _STAGES:
-        print(f"  {'✅' if s['ok'] else '❌'} {s['name']:<10} {s['elapsed']:>7.2f}s  {s['detail']}")
+        print(f"  {'✅' if s['ok'] else '❌'} {s['name']:<12} {s['elapsed']:>7.2f}s  {s['detail']}")
 
     failed = [s for s in _STAGES if not s["ok"]]
     if failed:

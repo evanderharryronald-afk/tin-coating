@@ -96,6 +96,7 @@ class ModelInterpreter:
         self._shap_values = None
         self._shap_explainer = None
         self._perm_result = None
+        self._X_shap = None  # SHAP 采样数据，partial_dependence 在 SHAP 跳过场景会 fallback
 
     # ------------------------------------------------------------------
     # 1. Permutation Importance
@@ -315,9 +316,21 @@ class ModelInterpreter:
         try:
             print("\n[ModelInterpreter] 正在计算 Partial Dependence ...")
 
-            # 先确保 SHAP 值已计算（会创建 self._X_shap）
+            # 先确保 SHAP 值已计算（会创建 self._X_shap）；如果 SHAP 不可用，
+            # 就用 self.X 采样一份作为 PDP 的输入，避免 AttributeError
             if self._X_shap is None:
-                self._get_shap_explainer_and_values()
+                if HAS_SHAP:
+                    try:
+                        self._get_shap_explainer_and_values()
+                    except Exception as shap_err:
+                        print(f"[警告] 无法计算 SHAP（{shap_err}），PDP 将用 self.X 采样数据")
+                if self._X_shap is None:
+                    if len(self.X) > self.max_samples_for_shap:
+                        self._X_shap = self.X.sample(
+                            self.max_samples_for_shap, random_state=self.random_state
+                        )
+                    else:
+                        self._X_shap = self.X.copy()
 
             if features is None:
                 # 默认取前几个数值特征

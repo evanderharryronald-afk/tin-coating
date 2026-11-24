@@ -1359,6 +1359,9 @@ class SurfaceEDAAnalyzer:
         save_dir: str,
         title_prefix: str,
     ) -> Dict:
+        if train_idx is None or test_idx is None or len(train_idx) == 0 or len(test_idx) == 0:
+            print(f"[Train/Test] 跳过（train_idx/test_idx 缺失或为空）")
+            return {"skipped": True, "reason": "missing train_idx/test_idx"}
         train_data = data.loc[data.index.intersection(train_idx)]
         test_data = data.loc[data.index.intersection(test_idx)]
         print(f"[Train/Test] train={len(train_data)}, test={len(test_data)}")

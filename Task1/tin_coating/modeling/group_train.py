@@ -406,6 +406,12 @@ def fit_and_evaluate_surface(df, surface, params, group_tag="",
 
     # aux 以测试集为主（兼容原有画图逻辑），同时带上验证集信息
     aux = dict(
+        # 表面 / 规格组元信息（下游解释性 / 可视化用）
+        lab_col=f'{surface_cn}表面镀层重量A(XA1_0)',
+        online_col=online_col,
+        prefix=prefix,
+        surface_cn=surface_cn,
+
         X_train=X_train,
         y_true_train=y_true_train,
         actual_train=actual_train,
@@ -593,33 +599,41 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
 
     # ===== 模型解释性分析 =====
     feature_cols = get_feature_cols(surface)
+    lab_col = aux.get('lab_col')
+    online_col = aux.get('online_col')
 
     # 主分析：使用测试集（最可信）
     try:
-        print(f"\n[ModelInterpreter] 开始 {surface}表面的SHAP分析（测试集）...")
+        print(f"\n[ModelInterpreter] 开始 {surface}表面的解释性分析（测试集）...")
         test_interp_dir = f"result/grouped_by_coating_weight/interpretation/{group_tag}_{surface}/test_set"
-        
+
         if len(X_test) > 0:
             interpreter_test = ModelInterpreter(
                 model=corrector,
-                X=X_test,  # 使用测试集
+                X=X_test,
                 feature_names=feature_cols,
                 save_dir=test_interp_dir,
                 max_samples_for_shap=500,
             )
 
+            # 目标 y：Lab 真值 - 在线传感器 = 模型拟合的 Delta；如果拿不到就不传
+            y_target = None
+            if lab_col and online_col and lab_col in df.columns and online_col in df.columns:
+                y_test = df.loc[X_test.index, lab_col].values - df.loc[X_test.index, online_col].values
+                y_target = y_test.astype(float)
+
             interpreter_test.full_analysis(
-                y=None,
-                run_permutation=False,
+                y=y_target,
+                run_permutation=True,  # 真跑 permutation importance（<2s，省时间不如产出完整）
                 run_shap=True,
                 run_pdp=True,
                 pdp_features=feature_cols[:5],
             )
-            print(f"[✓] {surface}表面测试集SHAP分析完成")
+            print(f"[✓] {surface}表面测试集解释性分析完成（permutation + SHAP + PDP）")
         else:
-            print(f"[⚠] {surface}表面测试集为空，跳过测试集SHAP分析")
+            print(f"[⚠] {surface}表面测试集为空，跳过测试集解释性分析")
     except Exception as e:
-        print(f"[错误] {surface}表面测试集SHAP分析失败: {e}")
+        print(f"[错误] {surface}表面测试集解释性分析失败: {e}")
         import traceback
         traceback.print_exc()
 
@@ -627,31 +641,34 @@ def run_surface_pipeline(df, surface='Top', group_tag="", group_params=None,
     try:
         X_val = aux.get('X_val', None)
         if X_val is not None and len(X_val) > 0:
-            print(f"\n[ModelInterpreter] 开始 {surface}表面的SHAP分析（验证集）...")
+            print(f"\n[ModelInterpreter] 开始 {surface}表面的解释性分析（验证集）...")
             val_interp_dir = f"result/grouped_by_coating_weight/interpretation/{group_tag}_{surface}/val_set"
-            
+
             interpreter_val = ModelInterpreter(
                 model=corrector,
-                X=X_val,  # 使用验证集
+                X=X_val,
                 feature_names=feature_cols,
                 save_dir=val_interp_dir,
                 max_samples_for_shap=500,
             )
 
-            # 验证集只做SHAP分析，不做PDP（节省计算量）
+            y_val = None
+            if lab_col and online_col and lab_col in df.columns and online_col in df.columns:
+                y_val = (df.loc[X_val.index, lab_col].values -
+                         df.loc[X_val.index, online_col].values).astype(float)
+
             interpreter_val.full_analysis(
-                y=None,
-                run_permutation=False,
-                run_shap=True,  # 主要看这个，对比过拟合
-                run_pdp=False,  # 跳过，节省时间
+                y=y_val,
+                run_permutation=True,  # 真跑 permutation（可和测试集对比看特征重要性漂移）
+                run_shap=True,
+                run_pdp=False,  # PDP 只在测试集做，验证集跳过省时间
                 pdp_features=None,
             )
-            print(f"[✓] {surface}表面验证集SHAP分析完成（可与测试集对比诊断过拟合）")
+            print(f"[✓] {surface}表面验证集解释性分析完成（Permutation + SHAP，诊断过拟合）")
         else:
-            print(f"[⚠] {surface}表面验证集不可用或为空，跳过验证集SHAP分析")
+            print(f"[⚠] {surface}表面验证集不可用或为空，跳过验证集解释性分析")
     except Exception as e:
-        print(f"[警告] {surface}表面验证集SHAP分析失败（非致命）: {e}")
-        # 验证集SHAP失败不中断主流程
+        print(f"[警告] {surface}表面验证集解释性分析失败（非致命）: {e}")
         pass
 
     return corrector, metrics

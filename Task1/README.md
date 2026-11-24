@@ -109,17 +109,20 @@ python run_full_flow.py --rows 1000 --output result/predictions/my.xlsx
 
 **7 个 stage 真实落盘**（exit code 0 = 全通，每个阶段单独 try/except，EDA+诊断套件里单个子模块 fail 不中断主流程）：
 
+所有分析类产物都落在 **带 version 的目录** 下：`result/<module>/<group>/<version>/`，version = `YYYYMMDD_HHMMSS`（或 `--version` 指定），同时写 `result/_flows/<version>.json` 作为 MLflow params.txt 等价物（记录本次运行的 args、各 stage 耗时和 exit code）。每个 module/group 下写 `_LATEST.txt` / `_LATEST.json` 指针指向最新 version。
+
 | Stage | 耗时 | 产物 |
 |---|---|---|
 | 启动自检 | < 1s | stdout 5 项 OK/WARN/FAIL |
 | 正式训练 | ~110s | `result/trained_models/by_group/<group>/{Top,Bot}_{model.joblib,metadata.json}` + `result/grouped_by_coating_weight/fitting_result/{fitting_result,residual_analysis,residual_train_vs_test}/` Top/Bot × 3 png + `.../interpretation/{group}_{Top,Bot}/{test_set,val_set}/` permutation + PDP（**permutation importance 真跑，不再阉割**）|
-| Walk-Forward CV | ~20s | `result/cv/<group>/cv_summary.json`（Top/Bot RMSE + MAE + folds 明细，**落盘**）|
-| EDA + 诊断套件 | ~48s | `result/eda/<group>/{Top,Bot}/` 每面 6 png（pearson + spearman + MI + MI matrix + DCOR + DCOR matrix，**corr 全开**）+ `.../pre|post/` surface 预诊断 + `result/diagnostics/<group>/{Top,Bot}/{residual,drift,interpretation}/` 每面残差 3 png + drift_summary.txt + permutation_importance.png + PDP |
+| Walk-Forward CV | ~20s | `result/cv/<group>/<version>/cv_summary.json` + `result/cv/<group>/_LATEST.txt`（Top/Bot RMSE + MAE + folds 明细，**带 version 落盘**）|
+| EDA + 诊断套件 | ~48s | `result/eda/<group>/<version>/{Top,Bot}/` 每面 6 png（pearson + spearman + MI + MI matrix + DCOR + DCOR matrix，**corr 全开**）+ `.../{pre,post}/` surface 预诊断 + `result/diagnostics/<group>/<version>/{Top,Bot}/residual/{distribution,heteroscedasticity,feature_relationship,temporal}/` 每面分布 + 异方差 + 残差 vs 特征 ×5 png + 时序 + `drift/drift_summary.txt` KS 漂移 + `interpretation/permutation_importance.{png,csv}` + `partial_dependence_both.png` |
 | 数据质量门 | ~8s | `monitoring/reports/data_quality_*.json` |
 | 月度健康检查 | ~8s | `monitoring/reports/monthly_health_*.json + .csv` |
-| 批量推理 | ~1s | `result/predictions/full_flow_<时间戳>.xlsx`（新增 `{Top,Bot}_Online_plus_correction` 和 `{Top,Bot}_Correction_Delta` 两列）|
+| 批量推理 | ~1s | `result/predictions/full_flow_<时间戳>.xlsx` |
+| **run_meta（自动写）** | — | `result/_flows/<version>.json`（args / 各 stage 耗时 / exit_code / artifacts 路径）+ `result/_flows/_LATEST.json` |
 
-**EDA + 诊断套件 = 8 个子模块**：eda corr × Top + eda corr × Bot + eda surface + Top 残差/漂移/解释 + Bot 残差/漂移/解释。每个子模块独立 try/except，失败只 WARN 不中断主流程。可用 `--skip-analytics` 跳过。
+**版本化机制**：每次 run_full_flow 生成唯一 `_VERSION = YYYYMMDD_HHMMSS`，全程共用。所有分析类产物（cv / eda / diagnostics）都带 version 目录；模型产物（trained_models/）保持固定路径（因为模型有 registry.json 自己的版本管理，不跟 flow 耦合）。CLI 子命令（`cli eda corr` / `cli diagnose drift` / `cli cv`）默认写固定路径，如果跑多次会覆盖 —— 想版本化就走 `run_full_flow.py`。**flow 和 registry 是两条独立的版本链**：flow 管一次性分析产物的时间戳，registry 管模型 artifact 的 approve/rollback。
 
 ### Path B：起 7×24 在线服务
 

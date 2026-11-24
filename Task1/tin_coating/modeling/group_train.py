@@ -31,8 +31,7 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # 创建结果保存目录结构
 os.makedirs("result/data/cleaned_data", exist_ok=True)
-os.makedirs("result/correlation_result", exist_ok=True)
-os.makedirs("result/fitting_result", exist_ok=True)
+os.makedirs("result/grouped_by_coating_weight", exist_ok=True)
 
 
 def check_residual_distribution(df, group_tag=""):

@@ -204,7 +204,7 @@ def heteroscedasticity_diagnostics(
 def feature_relationship_diagnostics(
     residuals: pd.Series, X: pd.DataFrame, label: str, save_dir: str,
     tag: str = "", n_bins=8, categorical_features=None, max_unique_for_cat=15,
-    top_n_features=None
+    top_n_features=5  # 默认只画前 5 个特征，防止 8 个特征 × 8 bins = 512 张图
 ):
     """
     对每个特征分别画：
@@ -469,7 +469,7 @@ def run_full_residual_diagnostics(
     label: str, save_dir: str, tag: str = "",
     n_bins=8, categorical_features=None,
     run_temporal=True, run_explainability=True,
-    top_n_features=None,
+    top_n_features=5,
     time_col=None,  # <--- 【新增参数】可以是列名字符串（如 "Produce Time"），也可以是独立的 pd.Series
     rolling_window=160, # <--- 【新增参数】控制 Rolling Mean 窗口大小
 ):
